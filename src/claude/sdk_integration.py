@@ -392,18 +392,29 @@ class ClaudeSDKManager:
                 else self._extract_content_from_messages(messages)
             )
 
+            num_turns = len(
+                [
+                    m
+                    for m in messages
+                    if isinstance(m, (UserMessage, AssistantMessage))
+                ]
+            )
+
+            # Warn if we hit or approached the max_turns limit
+            if num_turns >= self.config.claude_max_turns:
+                logger.warning(
+                    "Claude hit max_turns limit — response may be truncated",
+                    num_turns=num_turns,
+                    max_turns=self.config.claude_max_turns,
+                    session_id=final_session_id,
+                )
+
             return ClaudeResponse(
                 content=content,
                 session_id=final_session_id,
                 cost=cost,
                 duration_ms=duration_ms,
-                num_turns=len(
-                    [
-                        m
-                        for m in messages
-                        if isinstance(m, (UserMessage, AssistantMessage))
-                    ]
-                ),
+                num_turns=num_turns,
                 tools_used=tools_used,
             )
 
