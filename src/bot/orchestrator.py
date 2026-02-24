@@ -99,6 +99,9 @@ class MessageOrchestrator:
         self.deps = deps
         # Per-user state (keyed by Slack user ID)
         self._user_state: Dict[str, Dict[str, Any]] = {}
+        # Dedup: track recently processed event ts to avoid handling
+        # the same message via both `message` and `app_mention` events.
+        self._processed_events: Dict[str, float] = {}
 
     def _get_user_state(self, user_id: str) -> Dict[str, Any]:
         """Get or create per-user state dict."""
@@ -122,6 +125,9 @@ class MessageOrchestrator:
 
         # Message events -> Claude
         app.event("message")(self.handle_message_event)
+
+        # @mention events in channels -> Claude
+        app.event("app_mention")(self.handle_app_mention_event)
 
         # Block Kit action buttons (repo selection)
         app.action(re.compile(r"^cd:"))(self.handle_repo_action)
@@ -379,13 +385,31 @@ class MessageOrchestrator:
             blocks=blocks,
         )
 
-    # --- Message event handler ---
+    # --- Message event handlers ---
+
+    def _is_duplicate_event(self, event: dict) -> bool:
+        """Check if we already processed this event (dedup message vs app_mention)."""
+        ts = event.get("ts", "")
+        if not ts:
+            return False
+        now = time.time()
+        # Clean old entries (older than 60s)
+        self._processed_events = {
+            k: v for k, v in self._processed_events.items() if now - v < 60
+        }
+        if ts in self._processed_events:
+            return True
+        self._processed_events[ts] = now
+        return False
 
     async def handle_message_event(self, event: dict, say: Callable, client: Any) -> None:
         """Route Slack message events to the appropriate handler."""
         # Ignore bot messages, message_changed, etc.
         subtype = event.get("subtype")
         if subtype is not None:
+            return
+
+        if self._is_duplicate_event(event):
             return
 
         user_id = event.get("user", "")
@@ -414,6 +438,34 @@ class MessageOrchestrator:
                 text=text,
                 client=client,
             )
+
+    async def handle_app_mention_event(
+        self, event: dict, say: Callable, client: Any
+    ) -> None:
+        """Handle @mentions — delegates to same logic, with dedup."""
+        if self._is_duplicate_event(event):
+            return
+
+        user_id = event.get("user", "")
+        if not user_id:
+            return
+
+        text = event.get("text", "")
+        # Strip the bot mention prefix (e.g. "<@U0AH554QF3K> hello" -> "hello")
+        text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+        if not text:
+            return
+
+        channel_id = event.get("channel", "")
+        thread_ts = event.get("thread_ts") or event.get("ts")
+
+        await self._handle_text_message(
+            user_id=user_id,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            text=text,
+            client=client,
+        )
 
     # --- Verbose progress helpers ---
 

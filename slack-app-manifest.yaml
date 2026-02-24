@@ -32,6 +32,7 @@ features:
 oauth_config:
   scopes:
     bot:
+      - app_mentions:read
       - chat:write
       - commands
       - files:read
@@ -50,6 +51,7 @@ oauth_config:
 settings:
   event_subscriptions:
     bot_events:
+      - app_mention
       - message.channels
       - message.groups
       - message.im
