@@ -11,8 +11,8 @@ from time import monotonic
 from typing import Awaitable, Callable, Optional, TypeVar
 
 import structlog
-from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
 
 from ..storage.models import ProjectThreadModel
 from ..storage.repositories import ProjectThreadRepository

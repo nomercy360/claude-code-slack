@@ -14,6 +14,9 @@ from slack_bolt.async_app import AsyncApp
 
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
+from .utils.cache import SlackInfoCache, infer_channel_type
+from .utils.reactions import ReactionManager
+from .utils.retry import slack_api_call
 
 logger = structlog.get_logger()
 
@@ -94,9 +97,16 @@ def _escape_mrkdwn(text: str) -> str:
 class MessageOrchestrator:
     """Routes Slack events to Claude. Agentic mode only."""
 
-    def __init__(self, settings: Settings, deps: Dict[str, Any]):
+    def __init__(
+        self,
+        settings: Settings,
+        deps: Dict[str, Any],
+        bot_user_id: str = "",
+    ):
         self.settings = settings
         self.deps = deps
+        self._bot_user_id = bot_user_id
+        self._cache = SlackInfoCache()
         # Per-user state (keyed by Slack user ID)
         self._user_state: Dict[str, Dict[str, Any]] = {}
         # Dedup: track recently processed event ts to avoid handling
@@ -136,9 +146,7 @@ class MessageOrchestrator:
 
     # --- Slash command handlers ---
 
-    async def agentic_start(
-        self, ack: Callable, command: dict, client: Any
-    ) -> None:
+    async def agentic_start(self, ack: Callable, command: dict, client: Any) -> None:
         """Brief welcome, no buttons."""
         await ack()
 
@@ -159,9 +167,7 @@ class MessageOrchestrator:
             ),
         )
 
-    async def agentic_new(
-        self, ack: Callable, command: dict, client: Any
-    ) -> None:
+    async def agentic_new(self, ack: Callable, command: dict, client: Any) -> None:
         """Reset session, one-line confirmation."""
         await ack()
 
@@ -177,9 +183,7 @@ class MessageOrchestrator:
             text="Session reset. What's next?",
         )
 
-    async def agentic_status(
-        self, ack: Callable, command: dict, client: Any
-    ) -> None:
+    async def agentic_status(self, ack: Callable, command: dict, client: Any) -> None:
         """Compact one-line status."""
         await ack()
 
@@ -216,9 +220,7 @@ class MessageOrchestrator:
             return int(user_override)
         return self.settings.verbose_level
 
-    async def agentic_verbose(
-        self, ack: Callable, command: dict, client: Any
-    ) -> None:
+    async def agentic_verbose(self, ack: Callable, command: dict, client: Any) -> None:
         """Set output verbosity: /verbose [0|1|2]."""
         await ack()
 
@@ -260,9 +262,7 @@ class MessageOrchestrator:
             text=f"Verbosity set to *{level}* ({labels[level]})",
         )
 
-    async def agentic_repo(
-        self, ack: Callable, command: dict, client: Any
-    ) -> None:
+    async def agentic_repo(self, ack: Callable, command: dict, client: Any) -> None:
         """List repos in workspace or switch to one.
 
         /repo          — list subdirectories with git indicators
@@ -359,14 +359,10 @@ class MessageOrchestrator:
                 }
             )
             if len(button_elements) >= 5:  # Slack max 5 elements per actions block
-                actions_blocks.append(
-                    {"type": "actions", "elements": button_elements}
-                )
+                actions_blocks.append({"type": "actions", "elements": button_elements})
                 button_elements = []
         if button_elements:
-            actions_blocks.append(
-                {"type": "actions", "elements": button_elements}
-            )
+            actions_blocks.append({"type": "actions", "elements": button_elements})
 
         blocks = [
             {
@@ -402,7 +398,9 @@ class MessageOrchestrator:
         self._processed_events[ts] = now
         return False
 
-    async def handle_message_event(self, event: dict, say: Callable, client: Any) -> None:
+    async def handle_message_event(
+        self, event: dict, say: Callable, client: Any
+    ) -> None:
         """Route Slack message events to the appropriate handler."""
         # Ignore bot messages, message_changed, etc.
         # Allow file_share (file uploads come with this subtype).
@@ -420,13 +418,23 @@ class MessageOrchestrator:
         text = event.get("text", "")
         files = event.get("files")
         channel_id = event.get("channel", "")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        event_ts = event.get("ts", "")
+        thread_ts = event.get("thread_ts") or event_ts
+
+        # Mention gating: in channels/groups only respond if @mentioned
+        channel_type = event.get("channel_type") or infer_channel_type(channel_id)
+        if channel_type in ("channel", "group") and not files:
+            if not self._bot_user_id or f"<@{self._bot_user_id}>" not in (text or ""):
+                return
+            # Strip mention from text
+            text = re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
         if files:
             await self._handle_file_upload(
                 user_id=user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
+                event_ts=event_ts,
                 files=files,
                 caption=text,
                 client=client,
@@ -436,6 +444,7 @@ class MessageOrchestrator:
                 user_id=user_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
+                event_ts=event_ts,
                 text=text,
                 client=client,
             )
@@ -458,12 +467,14 @@ class MessageOrchestrator:
             return
 
         channel_id = event.get("channel", "")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+        event_ts = event.get("ts", "")
+        thread_ts = event.get("thread_ts") or event_ts
 
         await self._handle_text_message(
             user_id=user_id,
             channel_id=channel_id,
             thread_ts=thread_ts,
+            event_ts=event_ts,
             text=text,
             client=client,
         )
@@ -539,15 +550,17 @@ class MessageOrchestrator:
         progress_ts: str,
         tool_log: List[Dict[str, Any]],
         start_time: float,
+        reactions: Optional[ReactionManager] = None,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
-        Returns None when verbose_level is 0 (nothing to display).
+        Returns None when verbose_level is 0 and no reactions to manage.
         """
-        if verbose_level == 0:
+        if verbose_level == 0 and reactions is None:
             return None
 
         last_edit_time = [0.0]
+        tool_reaction_set = [False]
 
         async def _on_stream(update_obj: StreamUpdate) -> None:
             if update_obj.tool_calls:
@@ -555,6 +568,10 @@ class MessageOrchestrator:
                     name = tc.get("name", "unknown")
                     detail = self._summarize_tool_input(name, tc.get("input", {}))
                     tool_log.append({"kind": "tool", "name": name, "detail": detail})
+                # Set tool reaction on first tool call
+                if reactions and not tool_reaction_set[0]:
+                    tool_reaction_set[0] = True
+                    await reactions.set("hammer_and_wrench")
 
             if update_obj.type == "assistant" and update_obj.content:
                 text = update_obj.content.strip()
@@ -564,20 +581,21 @@ class MessageOrchestrator:
                         tool_log.append({"kind": "text", "detail": first_line[:120]})
 
             # Throttle progress message edits to avoid Slack rate limits
-            now = time.time()
-            if (now - last_edit_time[0]) >= 2.0 and tool_log:
-                last_edit_time[0] = now
-                new_text = self._format_verbose_progress(
-                    tool_log, verbose_level, start_time
-                )
-                try:
-                    await client.chat_update(
-                        channel=channel_id,
-                        ts=progress_ts,
-                        text=new_text,
+            if verbose_level > 0:
+                now = time.time()
+                if (now - last_edit_time[0]) >= 2.0 and tool_log:
+                    last_edit_time[0] = now
+                    new_text = self._format_verbose_progress(
+                        tool_log, verbose_level, start_time
                     )
-                except Exception:
-                    pass
+                    try:
+                        await client.chat_update(
+                            channel=channel_id,
+                            ts=progress_ts,
+                            text=new_text,
+                        )
+                    except Exception:
+                        pass
 
         return _on_stream
 
@@ -590,6 +608,7 @@ class MessageOrchestrator:
         thread_ts: str,
         text: str,
         client: Any,
+        event_ts: str = "",
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
         logger.info(
@@ -600,12 +619,21 @@ class MessageOrchestrator:
 
         state = self._get_user_state(user_id)
 
+        # Emoji reaction on the user's original message
+        reactions: Optional[ReactionManager] = None
+        if event_ts:
+            reactions = ReactionManager(client, channel_id, event_ts)
+            await reactions.set("eyes")
+
         # Rate limit check
         rate_limiter = self.deps.get("rate_limiter")
         if rate_limiter:
             allowed, limit_message = await rate_limiter.check_rate_limit(user_id, 0.001)
             if not allowed:
-                await client.chat_postMessage(
+                if reactions:
+                    await reactions.set("x")
+                await slack_api_call(
+                    client.chat_postMessage,
                     channel=channel_id,
                     thread_ts=thread_ts,
                     text=f"Rate limit: {limit_message}",
@@ -613,7 +641,8 @@ class MessageOrchestrator:
                 return
 
         # Post "Working..." progress message
-        progress_result = await client.chat_postMessage(
+        progress_result = await slack_api_call(
+            client.chat_postMessage,
             channel=channel_id,
             thread_ts=thread_ts,
             text="Working...",
@@ -622,6 +651,8 @@ class MessageOrchestrator:
 
         claude_integration = self.deps.get("claude_integration")
         if not claude_integration:
+            if reactions:
+                await reactions.set("x")
             await client.chat_update(
                 channel=channel_id,
                 ts=progress_ts,
@@ -637,7 +668,13 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
         on_stream = self._make_stream_callback(
-            verbose_level, client, channel_id, progress_ts, tool_log, start_time
+            verbose_level,
+            client,
+            channel_id,
+            progress_ts,
+            tool_log,
+            start_time,
+            reactions=reactions,
         )
 
         success = True
@@ -677,6 +714,10 @@ class MessageOrchestrator:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             response_text = f"Error: {str(e)[:500]}"
 
+        # Set final reaction
+        if reactions:
+            await reactions.set("white_check_mark" if success else "x")
+
         # Delete progress message and send final response
         try:
             await client.chat_delete(channel=channel_id, ts=progress_ts)
@@ -687,7 +728,8 @@ class MessageOrchestrator:
         from ..utils.constants import SAFE_MESSAGE_LENGTH
 
         if len(response_text) <= SAFE_MESSAGE_LENGTH:
-            await client.chat_postMessage(
+            await slack_api_call(
+                client.chat_postMessage,
                 channel=channel_id,
                 thread_ts=thread_ts,
                 text=response_text,
@@ -696,7 +738,8 @@ class MessageOrchestrator:
             # Split into chunks
             chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
             for i, chunk in enumerate(chunks):
-                await client.chat_postMessage(
+                await slack_api_call(
+                    client.chat_postMessage,
                     channel=channel_id,
                     thread_ts=thread_ts,
                     text=chunk,
@@ -722,6 +765,7 @@ class MessageOrchestrator:
         files: List[dict],
         caption: str,
         client: Any,
+        event_ts: str = "",
     ) -> None:
         """Process file upload -> Claude."""
         logger.info(
@@ -732,6 +776,12 @@ class MessageOrchestrator:
 
         state = self._get_user_state(user_id)
 
+        # Emoji reaction on the user's original message
+        reactions: Optional[ReactionManager] = None
+        if event_ts:
+            reactions = ReactionManager(client, channel_id, event_ts)
+            await reactions.set("eyes")
+
         # Security validation on first file
         file_info = files[0]
         filename = file_info.get("name", "unknown")
@@ -741,7 +791,10 @@ class MessageOrchestrator:
         if security_validator:
             valid, error = security_validator.validate_filename(filename)
             if not valid:
-                await client.chat_postMessage(
+                if reactions:
+                    await reactions.set("x")
+                await slack_api_call(
+                    client.chat_postMessage,
                     channel=channel_id,
                     thread_ts=thread_ts,
                     text=f"File rejected: {error}",
@@ -750,14 +803,18 @@ class MessageOrchestrator:
 
         max_size = 10 * 1024 * 1024
         if file_size > max_size:
-            await client.chat_postMessage(
+            if reactions:
+                await reactions.set("x")
+            await slack_api_call(
+                client.chat_postMessage,
                 channel=channel_id,
                 thread_ts=thread_ts,
                 text=f"File too large ({file_size / 1024 / 1024:.1f}MB). Max: 10MB.",
             )
             return
 
-        progress_result = await client.chat_postMessage(
+        progress_result = await slack_api_call(
+            client.chat_postMessage,
             channel=channel_id,
             thread_ts=thread_ts,
             text="Working...",
@@ -768,6 +825,8 @@ class MessageOrchestrator:
         try:
             url_private = file_info.get("url_private")
             if not url_private:
+                if reactions:
+                    await reactions.set("x")
                 await client.chat_update(
                     channel=channel_id,
                     ts=progress_ts,
@@ -777,12 +836,12 @@ class MessageOrchestrator:
 
             import aiohttp
 
-            headers = {
-                "Authorization": f"Bearer {self.settings.slack_bot_token_str}"
-            }
+            headers = {"Authorization": f"Bearer {self.settings.slack_bot_token_str}"}
             async with aiohttp.ClientSession() as session:
                 async with session.get(url_private, headers=headers) as resp:
                     if resp.status != 200:
+                        if reactions:
+                            await reactions.set("x")
                         await client.chat_update(
                             channel=channel_id,
                             ts=progress_ts,
@@ -801,6 +860,8 @@ class MessageOrchestrator:
                     f"```\n{content}\n```"
                 )
             except UnicodeDecodeError:
+                if reactions:
+                    await reactions.set("x")
                 await client.chat_update(
                     channel=channel_id,
                     ts=progress_ts,
@@ -809,6 +870,8 @@ class MessageOrchestrator:
                 return
 
         except Exception as e:
+            if reactions:
+                await reactions.set("x")
             await client.chat_update(
                 channel=channel_id,
                 ts=progress_ts,
@@ -819,6 +882,8 @@ class MessageOrchestrator:
         # Process with Claude
         claude_integration = self.deps.get("claude_integration")
         if not claude_integration:
+            if reactions:
+                await reactions.set("x")
             await client.chat_update(
                 channel=channel_id,
                 ts=progress_ts,
@@ -834,9 +899,16 @@ class MessageOrchestrator:
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
         on_stream = self._make_stream_callback(
-            verbose_level, client, channel_id, progress_ts, tool_log, start_time
+            verbose_level,
+            client,
+            channel_id,
+            progress_ts,
+            tool_log,
+            start_time,
+            reactions=reactions,
         )
 
+        success = True
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -854,37 +926,41 @@ class MessageOrchestrator:
 
             response_text = claude_response.content or "(no response)"
 
-            try:
-                await client.chat_delete(channel=channel_id, ts=progress_ts)
-            except Exception:
-                pass
+        except Exception as e:
+            success = False
+            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
+            response_text = f"Error: {str(e)[:500]}"
 
-            from ..utils.constants import SAFE_MESSAGE_LENGTH
+        # Set final reaction
+        if reactions:
+            await reactions.set("white_check_mark" if success else "x")
 
-            if len(response_text) <= SAFE_MESSAGE_LENGTH:
-                await client.chat_postMessage(
+        # Delete progress message and send final response
+        try:
+            await client.chat_delete(channel=channel_id, ts=progress_ts)
+        except Exception:
+            pass
+
+        from ..utils.constants import SAFE_MESSAGE_LENGTH
+
+        if len(response_text) <= SAFE_MESSAGE_LENGTH:
+            await slack_api_call(
+                client.chat_postMessage,
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=response_text,
+            )
+        else:
+            chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
+            for i, chunk in enumerate(chunks):
+                await slack_api_call(
+                    client.chat_postMessage,
                     channel=channel_id,
                     thread_ts=thread_ts,
-                    text=response_text,
+                    text=chunk,
                 )
-            else:
-                chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
-                for i, chunk in enumerate(chunks):
-                    await client.chat_postMessage(
-                        channel=channel_id,
-                        thread_ts=thread_ts,
-                        text=chunk,
-                    )
-                    if i < len(chunks) - 1:
-                        await asyncio.sleep(0.5)
-
-        except Exception as e:
-            await client.chat_update(
-                channel=channel_id,
-                ts=progress_ts,
-                text=f"Error: {str(e)[:500]}",
-            )
-            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.5)
 
     # --- Block Kit action handler ---
 

@@ -8,8 +8,8 @@ import asyncio
 from typing import List, Optional
 
 import structlog
-from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.errors import SlackApiError
+from slack_sdk.web.async_client import AsyncWebClient
 
 from ..events.bus import Event, EventBus
 from ..events.types import AgentResponseEvent

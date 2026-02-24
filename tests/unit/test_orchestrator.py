@@ -1,7 +1,5 @@
 """Tests for the MessageOrchestrator."""
 
-import asyncio
-import re
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -279,9 +277,7 @@ class TestRedactSecrets:
 class TestStreamCallback:
     """Verify stream callback behavior."""
 
-    def test_make_stream_callback_returns_none_when_quiet(
-        self, agentic_settings, deps
-    ):
+    def test_make_stream_callback_returns_none_when_quiet(self, agentic_settings, deps):
         """Verbose level 0 returns None callback."""
         orchestrator = MessageOrchestrator(agentic_settings, deps)
         callback = orchestrator._make_stream_callback(
@@ -307,3 +303,137 @@ class TestStreamCallback:
         )
         assert callback is not None
         assert callable(callback)
+
+    def test_make_stream_callback_returns_callable_when_reactions_provided(
+        self, agentic_settings, deps
+    ):
+        """Even verbose 0 returns a callback when reactions are provided."""
+        from src.bot.utils.reactions import ReactionManager
+
+        orchestrator = MessageOrchestrator(agentic_settings, deps)
+        rm = ReactionManager(AsyncMock(), "C123", "1234.5678")
+        callback = orchestrator._make_stream_callback(
+            verbose_level=0,
+            client=AsyncMock(),
+            channel_id="C123",
+            progress_ts="1234567890.123456",
+            tool_log=[],
+            start_time=0.0,
+            reactions=rm,
+        )
+        assert callback is not None
+
+
+# --- Mention gating tests ---
+
+
+class TestMentionGating:
+    """Verify mention gating in channels."""
+
+    @pytest.fixture
+    def async_deps(self):
+        """Dependencies with AsyncMock for async methods."""
+        rate_limiter = MagicMock()
+        rate_limiter.check_rate_limit = AsyncMock(return_value=(True, ""))
+        audit_logger = MagicMock()
+        audit_logger.log_command = AsyncMock()
+
+        claude_integration = AsyncMock()
+        response = MagicMock()
+        response.session_id = "sess-1"
+        response.content = "Hello!"
+        claude_integration.run_command = AsyncMock(return_value=response)
+
+        storage = MagicMock()
+        storage.save_claude_interaction = AsyncMock()
+
+        return {
+            "claude_integration": claude_integration,
+            "storage": storage,
+            "security_validator": MagicMock(),
+            "rate_limiter": rate_limiter,
+            "audit_logger": audit_logger,
+        }
+
+    async def test_dm_always_responds(self, agentic_settings, async_deps):
+        """DMs (channel_type=im) are always processed."""
+        orchestrator = MessageOrchestrator(
+            agentic_settings, async_deps, bot_user_id="UBOT"
+        )
+        say = AsyncMock()
+        client = AsyncMock()
+        client.chat_postMessage.return_value = {"ts": "1234.0001"}
+
+        event = {
+            "text": "hello",
+            "user": "U123",
+            "channel": "D456",
+            "channel_type": "im",
+            "ts": "9999.0001",
+        }
+
+        await orchestrator.handle_message_event(event=event, say=say, client=client)
+        client.chat_postMessage.assert_called()
+
+    async def test_channel_without_mention_ignored(self, agentic_settings, async_deps):
+        """Channel messages without @mention are ignored."""
+        orchestrator = MessageOrchestrator(
+            agentic_settings, async_deps, bot_user_id="UBOT"
+        )
+        say = AsyncMock()
+        client = AsyncMock()
+
+        event = {
+            "text": "hello everyone",
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "9999.0002",
+        }
+
+        await orchestrator.handle_message_event(event=event, say=say, client=client)
+        client.chat_postMessage.assert_not_called()
+
+    async def test_channel_with_mention_responds(self, agentic_settings, async_deps):
+        """Channel messages with @mention are processed."""
+        orchestrator = MessageOrchestrator(
+            agentic_settings, async_deps, bot_user_id="UBOT"
+        )
+        say = AsyncMock()
+        client = AsyncMock()
+        client.chat_postMessage.return_value = {"ts": "1234.0002"}
+
+        event = {
+            "text": "<@UBOT> hello",
+            "user": "U123",
+            "channel": "C456",
+            "channel_type": "channel",
+            "ts": "9999.0003",
+        }
+
+        await orchestrator.handle_message_event(event=event, say=say, client=client)
+        client.chat_postMessage.assert_called()
+
+    async def test_dedup_prevents_double_processing(self, agentic_settings, async_deps):
+        """Same event ts is not processed twice."""
+        orchestrator = MessageOrchestrator(
+            agentic_settings, async_deps, bot_user_id="UBOT"
+        )
+        say = AsyncMock()
+        client = AsyncMock()
+        client.chat_postMessage.return_value = {"ts": "1234.0003"}
+
+        event = {
+            "text": "hello",
+            "user": "U123",
+            "channel": "D456",
+            "channel_type": "im",
+            "ts": "9999.0004",
+        }
+
+        await orchestrator.handle_message_event(event=event, say=say, client=client)
+        call_count = client.chat_postMessage.call_count
+
+        # Second call with same ts should be deduped
+        await orchestrator.handle_message_event(event=event, say=say, client=client)
+        assert client.chat_postMessage.call_count == call_count

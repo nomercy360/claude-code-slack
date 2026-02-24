@@ -127,9 +127,7 @@ class TestStorageFacade:
 
         # Create multiple sessions
         for i in range(3):
-            await storage.create_session(
-                "U12350", f"/test/project{i}", f"session-{i}"
-            )
+            await storage.create_session("U12350", f"/test/project{i}", f"session-{i}")
 
             # Add some activity
             claude_response = ClaudeResponse(

@@ -11,8 +11,8 @@ import asyncio
 from typing import Any, Callable, Dict, Optional
 
 import structlog
-from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+from slack_bolt.async_app import AsyncApp
 
 from ..config.settings import Settings
 from ..exceptions import ClaudeCodeSlackError
@@ -32,8 +32,9 @@ class ClaudeCodeBot:
         self.app: Optional[AsyncApp] = None
         self.socket_handler: Optional[AsyncSocketModeHandler] = None
         self.is_running = False
+        self.bot_user_id: str = ""
         self.feature_registry: Optional[FeatureRegistry] = None
-        self.orchestrator = MessageOrchestrator(settings, dependencies)
+        self.orchestrator: Optional[MessageOrchestrator] = None
 
     async def initialize(self) -> None:
         """Initialize bot application. Idempotent — safe to call multiple times."""
@@ -46,6 +47,19 @@ class ClaudeCodeBot:
         self.app = AsyncApp(
             token=self.settings.slack_bot_token_str,
             signing_secret=self.settings.slack_signing_secret_str,
+        )
+
+        # Resolve bot user ID for mention detection
+        try:
+            auth_result = await self.app.client.auth_test()
+            self.bot_user_id = auth_result.get("user_id", "")
+            logger.info("Bot user ID resolved", bot_user_id=self.bot_user_id)
+        except Exception as e:
+            logger.warning("Failed to resolve bot user ID", error=str(e))
+
+        # Create orchestrator with bot_user_id
+        self.orchestrator = MessageOrchestrator(
+            self.settings, self.deps, bot_user_id=self.bot_user_id
         )
 
         # Initialize feature registry
@@ -81,15 +95,9 @@ class ClaudeCodeBot:
         from .middleware.security import security_middleware
 
         # Wrap each middleware so it receives our dependencies dict
-        self.app.middleware(
-            self._create_middleware_handler(security_middleware)
-        )
-        self.app.middleware(
-            self._create_middleware_handler(auth_middleware)
-        )
-        self.app.middleware(
-            self._create_middleware_handler(rate_limit_middleware)
-        )
+        self.app.middleware(self._create_middleware_handler(security_middleware))
+        self.app.middleware(self._create_middleware_handler(auth_middleware))
+        self.app.middleware(self._create_middleware_handler(rate_limit_middleware))
 
         logger.info("Middleware added to bot")
 

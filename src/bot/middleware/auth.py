@@ -113,9 +113,7 @@ async def auth_middleware(
         return  # Stop processing
 
 
-async def require_auth(
-    next_handler: Callable, body: Any, data: Dict[str, Any]
-) -> Any:
+async def require_auth(next_handler: Callable, body: Any, data: Dict[str, Any]) -> Any:
     """Stricter middleware that only allows authenticated users."""
     user_id = data.get("_slack_user_id")
     auth_manager = data.get("auth_manager")

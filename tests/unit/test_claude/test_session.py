@@ -318,9 +318,7 @@ class TestSessionManager:
         assert persisted[0].session_id == "session-1"
 
         # session-2 should be gone
-        loaded = await session_manager.storage.load_session(
-            "session-2", user_id="U123"
-        )
+        loaded = await session_manager.storage.load_session("session-2", user_id="U123")
         assert loaded is None
 
     async def test_get_or_create_rejects_wrong_user_active_cache(self, session_manager):

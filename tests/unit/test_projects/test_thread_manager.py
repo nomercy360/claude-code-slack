@@ -175,9 +175,7 @@ async def test_sync_channels_api_error_counted_as_failure(
     assert result.failed == 1
 
 
-async def test_sync_renames_existing_mapping(
-    tmp_path: Path, db_manager
-) -> None:
+async def test_sync_renames_existing_mapping(tmp_path: Path, db_manager) -> None:
     """When project name changes, manager renames mapping."""
     approved = tmp_path / "projects"
     approved.mkdir()
@@ -212,9 +210,7 @@ async def test_sync_renames_existing_mapping(
     assert mapping.topic_name == "Pretty Name"
 
 
-async def test_sync_skips_rename_when_name_matches(
-    tmp_path: Path, db_manager
-) -> None:
+async def test_sync_skips_rename_when_name_matches(tmp_path: Path, db_manager) -> None:
     """When DB name already matches, sync should not rename."""
     approved = tmp_path / "projects"
     approved.mkdir()
@@ -257,9 +253,7 @@ async def test_sync_create_sends_bootstrap_message(tmp_path: Path, db_manager) -
     manager = ProjectThreadManager(registry, repo, sync_action_interval_seconds=0.0)
 
     client = _mock_slack_client()
-    client.chat_postMessage = AsyncMock(
-        return_value={"ok": True, "ts": "101.000000"}
-    )
+    client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "101.000000"})
 
     result = await manager.sync_channels(client, channel_id="C042")
 
@@ -283,9 +277,7 @@ async def test_sync_topics_alias_calls_sync_channels(
     manager = ProjectThreadManager(registry, repo, sync_action_interval_seconds=0.0)
 
     client = _mock_slack_client()
-    client.chat_postMessage = AsyncMock(
-        return_value={"ok": True, "ts": "101.000000"}
-    )
+    client.chat_postMessage = AsyncMock(return_value={"ok": True, "ts": "101.000000"})
 
     result = await manager.sync_topics(client, chat_id="C042")
 
