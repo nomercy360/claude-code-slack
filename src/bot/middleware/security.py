@@ -4,13 +4,11 @@ from typing import Any, Callable, Dict
 
 import structlog
 
-from ..utils.html_format import escape_html
-
 logger = structlog.get_logger()
 
 
 async def security_middleware(
-    handler: Callable, event: Any, data: Dict[str, Any]
+    next_handler: Callable, body: Any, data: Dict[str, Any]
 ) -> Any:
     """Validate inputs and detect security threats.
 
@@ -20,76 +18,91 @@ async def security_middleware(
     3. Detects potential attacks
     4. Logs security violations
     """
-    user_id = event.effective_user.id if event.effective_user else None
-    username = (
-        getattr(event.effective_user, "username", None)
-        if event.effective_user
-        else None
-    )
+    user_id = data.get("_slack_user_id")
+    client = data.get("_slack_client")
 
     if not user_id:
-        logger.warning("No user information in update")
-        return await handler(event, data)
+        logger.warning("No user information in event")
+        return await next_handler()
 
-    # Get dependencies from context
+    # Get dependencies from data
     security_validator = data.get("security_validator")
     audit_logger = data.get("audit_logger")
 
     if not security_validator:
         logger.error("Security validator not available in middleware context")
-        # Continue without validation (log error but don't block)
-        return await handler(event, data)
+        return await next_handler()
 
     # In agentic mode, user text is a prompt to Claude — not a command.
-    # Skip input validation so natural conversation (backticks, paths, etc.) works.
+    # Skip input validation so natural conversation works.
     settings = data.get("settings")
     agentic_mode = getattr(settings, "agentic_mode", False) if settings else False
 
-    # Validate text content if present (classic mode only)
-    message = event.effective_message
-    if message and message.text and not agentic_mode:
+    # Extract text and files from event body
+    text = ""
+    files = None
+    if "event" in body:
+        text = body["event"].get("text", "")
+        files = body["event"].get("files")
+    elif "text" in body:
+        text = body.get("text", "")
+
+    # Validate text content (classic mode only)
+    if text and not agentic_mode:
         is_safe, violation_type = await validate_message_content(
-            message.text, security_validator, user_id, audit_logger
+            text, security_validator, user_id, audit_logger
         )
         if not is_safe:
-            await message.reply_text(
-                f"🛡️ <b>Security Alert</b>\n\n"
-                f"Your message contains potentially dangerous content and has been blocked.\n"
-                f"Violation: {escape_html(violation_type)}\n\n"
-                "If you believe this is an error, please contact the administrator.",
-                parse_mode="HTML",
-            )
+            if client:
+                channel = _get_response_channel(body)
+                if channel:
+                    await client.chat_postMessage(
+                        channel=channel,
+                        text=(
+                            "*Security Alert*\n\n"
+                            "Your message contains potentially dangerous content "
+                            "and has been blocked.\n"
+                            f"Violation: {violation_type}\n\n"
+                            "If you believe this is an error, please contact "
+                            "the administrator."
+                        ),
+                    )
             return  # Block processing
 
     # Validate file uploads if present
-    if message and message.document:
-        is_safe, error_message = await validate_file_upload(
-            message.document, security_validator, user_id, audit_logger
-        )
-        if not is_safe:
-            await message.reply_text(
-                f"🛡️ <b>File Upload Blocked</b>\n\n"
-                f"{escape_html(error_message)}\n\n"
-                "Please ensure your file meets security requirements.",
-                parse_mode="HTML",
+    if files:
+        for file_info in files:
+            is_safe, error_message = await validate_file_upload(
+                file_info, security_validator, user_id, audit_logger
             )
-            return  # Block processing
+            if not is_safe:
+                if client:
+                    channel = _get_response_channel(body)
+                    if channel:
+                        await client.chat_postMessage(
+                            channel=channel,
+                            text=(
+                                "*File Upload Blocked*\n\n"
+                                f"{error_message}\n\n"
+                                "Please ensure your file meets security requirements."
+                            ),
+                        )
+                return  # Block processing
 
     # Log successful security validation
     logger.debug(
         "Security validation passed",
         user_id=user_id,
-        username=username,
-        has_text=bool(message and message.text),
-        has_document=bool(message and message.document),
+        has_text=bool(text),
+        has_files=bool(files),
     )
 
     # Continue to handler
-    return await handler(event, data)
+    return await next_handler()
 
 
 async def validate_message_content(
-    text: str, security_validator: Any, user_id: int, audit_logger: Any
+    text: str, security_validator: Any, user_id: str, audit_logger: Any
 ) -> tuple[bool, str]:
     """Validate message text content for security threats."""
 
@@ -209,13 +222,17 @@ async def validate_message_content(
 
 
 async def validate_file_upload(
-    document: Any, security_validator: Any, user_id: int, audit_logger: Any
+    file_info: dict, security_validator: Any, user_id: str, audit_logger: Any
 ) -> tuple[bool, str]:
-    """Validate file uploads for security."""
+    """Validate file uploads for security.
 
-    filename = getattr(document, "file_name", "unknown")
-    file_size = getattr(document, "file_size", 0)
-    mime_type = getattr(document, "mime_type", "unknown")
+    Args:
+        file_info: Slack file object dict with keys like 'name', 'size',
+                   'mimetype', etc.
+    """
+    filename = file_info.get("name", "unknown")
+    file_size = file_info.get("size", 0)
+    mime_type = file_info.get("mimetype", "unknown")
 
     # Validate filename
     is_valid, error_message = security_validator.validate_filename(filename)
@@ -301,101 +318,10 @@ async def validate_file_upload(
     return True, ""
 
 
-async def threat_detection_middleware(
-    handler: Callable, event: Any, data: Dict[str, Any]
-) -> Any:
-    """Advanced threat detection middleware.
-
-    This middleware looks for patterns that might indicate
-    sophisticated attacks or reconnaissance attempts.
-    """
-    user_id = event.effective_user.id if event.effective_user else None
-    if not user_id:
-        return await handler(event, data)
-
-    audit_logger = data.get("audit_logger")
-
-    # Track user behavior patterns
-    user_behavior = data.setdefault("user_behavior", {})
-    user_data = user_behavior.setdefault(
-        user_id,
-        {
-            "message_count": 0,
-            "failed_commands": 0,
-            "path_requests": 0,
-            "file_requests": 0,
-            "first_seen": None,
-        },
-    )
-
-    import time
-
-    current_time = time.time()
-
-    if user_data["first_seen"] is None:
-        user_data["first_seen"] = current_time
-
-    user_data["message_count"] += 1
-
-    # Check for reconnaissance patterns
-    message = event.effective_message
-    text = message.text if message else ""
-
-    # Suspicious commands that might indicate reconnaissance
-    recon_patterns = [
-        r"ls\s+/",
-        r"find\s+/",
-        r"locate\s+",
-        r"which\s+",
-        r"whereis\s+",
-        r"ps\s+",
-        r"netstat\s+",
-        r"lsof\s+",
-        r"env\s*$",
-        r"printenv\s*$",
-        r"whoami\s*$",
-        r"id\s*$",
-        r"uname\s+",
-        r"cat\s+/etc/",
-        r"cat\s+/proc/",
-    ]
-
-    import re
-
-    recon_attempts = sum(
-        1 for pattern in recon_patterns if re.search(pattern, text, re.IGNORECASE)
-    )
-
-    if recon_attempts > 0:
-        user_data["recon_attempts"] = (
-            user_data.get("recon_attempts", 0) + recon_attempts
-        )
-
-        # Alert if too many reconnaissance attempts
-        if user_data["recon_attempts"] > 5:
-            if audit_logger:
-                await audit_logger.log_security_violation(
-                    user_id=user_id,
-                    violation_type="reconnaissance_attempt",
-                    details=f"Multiple reconnaissance patterns detected: {user_data['recon_attempts']}",
-                    severity="high",
-                    attempted_action="reconnaissance",
-                )
-
-            logger.warning(
-                "Reconnaissance attempt pattern detected",
-                user_id=user_id,
-                total_attempts=user_data["recon_attempts"],
-                current_message=text[:100],
-            )
-
-            if event.effective_message:
-                await event.effective_message.reply_text(
-                    "🔍 <b>Suspicious Activity Detected</b>\n\n"
-                    "Multiple reconnaissance-style commands detected. "
-                    "This activity has been logged.\n\n"
-                    "If you have legitimate needs, please contact the administrator.",
-                    parse_mode="HTML",
-                )
-
-    return await handler(event, data)
+def _get_response_channel(body: dict) -> str:
+    """Extract the best channel to respond to from a Slack event body."""
+    if "event" in body:
+        return body["event"].get("channel", "")
+    if "channel_id" in body:
+        return body["channel_id"]
+    return ""

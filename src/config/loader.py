@@ -46,8 +46,8 @@ def load_config(
         # Debug: Log key environment variables before Settings creation
         logger.debug(
             "Environment variables check",
-            telegram_bot_token_set=bool(os.getenv("TELEGRAM_BOT_TOKEN")),
-            telegram_bot_username=os.getenv("TELEGRAM_BOT_USERNAME"),
+            slack_bot_token_set=bool(os.getenv("SLACK_BOT_TOKEN")),
+            slack_app_token_set=bool(os.getenv("SLACK_APP_TOKEN")),
             approved_directory=os.getenv("APPROVED_DIRECTORY"),
             debug_mode=os.getenv("DEBUG"),
         )
@@ -122,10 +122,10 @@ def _validate_config(settings: Settings) -> None:
     if settings.enable_project_threads:
         if (
             settings.project_threads_mode == "group"
-            and settings.project_threads_chat_id is None
+            and settings.project_threads_channel_id is None
         ):
             raise InvalidConfigError(
-                "Project thread mode is 'group' but no project_threads_chat_id provided"
+                "Project thread mode is 'group' but no project_threads_channel_id provided"
             )
         if not settings.projects_config_path:
             raise InvalidConfigError(
@@ -171,8 +171,6 @@ def _get_enabled_features_summary(settings: Settings) -> list[str]:
         features.append("quick_actions")
     if settings.enable_token_auth:
         features.append("token_auth")
-    if settings.webhook_url:
-        features.append("webhook")
     return features
 
 
@@ -191,8 +189,9 @@ def create_test_config(**overrides: Any) -> Settings:
     # Add required fields for testing
     test_values.update(
         {
-            "telegram_bot_token": "test_token_123",
-            "telegram_bot_username": "test_bot",
+            "slack_bot_token": "xoxb-test-token-123",
+            "slack_app_token": "xapp-test-token-123",
+            "slack_signing_secret": "test-signing-secret",
             "approved_directory": "/tmp/test_projects",
         }
     )

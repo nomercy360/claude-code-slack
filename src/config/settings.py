@@ -33,15 +33,20 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # Bot settings
-    telegram_bot_token: SecretStr = Field(
-        ..., description="Telegram bot token from BotFather"
+    slack_bot_token: SecretStr = Field(
+        ..., description="Slack bot OAuth token (xoxb-...)"
     )
-    telegram_bot_username: str = Field(..., description="Bot username without @")
+    slack_app_token: SecretStr = Field(
+        ..., description="Slack app-level token for Socket Mode (xapp-...)"
+    )
+    slack_signing_secret: Optional[SecretStr] = Field(
+        None, description="Slack signing secret for request verification"
+    )
 
     # Security
     approved_directory: Path = Field(..., description="Base directory for projects")
-    allowed_users: Optional[List[int]] = Field(
-        None, description="Allowed Telegram user IDs"
+    allowed_users: Optional[List[str]] = Field(
+        None, description="Allowed Slack user IDs"
     )
     enable_token_auth: bool = Field(
         False, description="Enable token-based authentication"
@@ -188,11 +193,6 @@ class Settings(BaseSettings):
     debug: bool = Field(False, description="Enable debug mode")
     development_mode: bool = Field(False, description="Enable development features")
 
-    # Webhook settings (optional)
-    webhook_url: Optional[str] = Field(None, description="Webhook URL for bot")
-    webhook_port: int = Field(8443, description="Webhook port")
-    webhook_path: str = Field("/webhook", description="Webhook path")
-
     # Agentic platform settings
     enable_api_server: bool = Field(False, description="Enable FastAPI webhook server")
     api_server_port: int = Field(8080, description="Webhook API server port")
@@ -203,19 +203,19 @@ class Settings(BaseSettings):
     webhook_api_secret: Optional[str] = Field(
         None, description="Shared secret for generic webhook providers"
     )
-    notification_chat_ids: Optional[List[int]] = Field(
-        None, description="Default Telegram chat IDs for proactive notifications"
+    notification_channel_ids: Optional[List[str]] = Field(
+        None, description="Default Slack channel IDs for proactive notifications"
     )
     enable_project_threads: bool = Field(
         False,
-        description="Enable strict routing by Telegram forum project threads",
+        description="Enable strict routing by Slack channel project threads",
     )
     project_threads_mode: Literal["private", "group"] = Field(
         "private",
-        description="Project thread mode: private chat topics or group forum topics",
+        description="Project thread mode: private or group channel routing",
     )
-    project_threads_chat_id: Optional[int] = Field(
-        None, description="Telegram forum chat ID where project topics are managed"
+    project_threads_channel_id: Optional[str] = Field(
+        None, description="Slack channel ID where project topics are managed"
     )
     projects_config_path: Optional[Path] = Field(
         None, description="Path to YAML project registry for thread mode"
@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     project_threads_sync_action_interval_seconds: float = Field(
         DEFAULT_PROJECT_THREADS_SYNC_ACTION_INTERVAL_SECONDS,
         description=(
-            "Minimum delay between Telegram API calls during project topic sync"
+            "Minimum delay between Slack API calls during project channel sync"
         ),
         ge=0.0,
     )
@@ -232,18 +232,16 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    @field_validator("allowed_users", "notification_chat_ids", mode="before")
+    @field_validator("allowed_users", "notification_channel_ids", mode="before")
     @classmethod
-    def parse_int_list(cls, v: Any) -> Optional[List[int]]:
-        """Parse comma-separated integer lists."""
+    def parse_str_list(cls, v: Any) -> Optional[List[str]]:
+        """Parse comma-separated string lists."""
         if v is None:
             return None
-        if isinstance(v, int):
-            return [v]
         if isinstance(v, str):
-            return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
+            return [uid.strip() for uid in v.split(",") if uid.strip()]
         if isinstance(v, list):
-            return [int(uid) for uid in v]
+            return [str(uid) for uid in v]
         return v  # type: ignore[no-any-return]
 
     @field_validator("claude_allowed_tools", mode="before")
@@ -333,20 +331,18 @@ class Settings(BaseSettings):
             raise ValueError("project_threads_mode must be one of ['private', 'group']")
         return mode
 
-    @field_validator("project_threads_chat_id", mode="before")
+    @field_validator("project_threads_channel_id", mode="before")
     @classmethod
-    def validate_project_threads_chat_id(cls, v: Any) -> Optional[int]:
-        """Allow empty chat ID for private mode by treating blank values as None."""
+    def validate_project_threads_channel_id(cls, v: Any) -> Optional[str]:
+        """Allow empty channel ID for private mode by treating blank values as None."""
         if v is None:
             return None
         if isinstance(v, str):
             value = v.strip()
             if not value:
                 return None
-            return int(value)
-        if isinstance(v, int):
-            return v
-        return v  # type: ignore[no-any-return]
+            return value
+        return str(v)  # type: ignore[no-any-return]
 
     @field_validator("log_level")
     @classmethod
@@ -373,10 +369,10 @@ class Settings(BaseSettings):
         if self.enable_project_threads:
             if (
                 self.project_threads_mode == "group"
-                and self.project_threads_chat_id is None
+                and self.project_threads_channel_id is None
             ):
                 raise ValueError(
-                    "project_threads_chat_id required when "
+                    "project_threads_channel_id required when "
                     "project_threads_mode is 'group'"
                 )
             if not self.projects_config_path:
@@ -400,9 +396,21 @@ class Settings(BaseSettings):
         return None
 
     @property
-    def telegram_token_str(self) -> str:
-        """Get Telegram token as string."""
-        return self.telegram_bot_token.get_secret_value()
+    def slack_bot_token_str(self) -> str:
+        """Get Slack bot token as string."""
+        return self.slack_bot_token.get_secret_value()
+
+    @property
+    def slack_app_token_str(self) -> str:
+        """Get Slack app token as string."""
+        return self.slack_app_token.get_secret_value()
+
+    @property
+    def slack_signing_secret_str(self) -> Optional[str]:
+        """Get Slack signing secret as string."""
+        if self.slack_signing_secret:
+            return self.slack_signing_secret.get_secret_value()
+        return None
 
     @property
     def auth_secret_str(self) -> Optional[str]:

@@ -33,7 +33,7 @@ class ClaudeIntegration:
         self,
         prompt: str,
         working_directory: Path,
-        user_id: int,
+        user_id: str,
         session_id: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
         force_new: bool = False,
@@ -164,7 +164,7 @@ class ClaudeIntegration:
 
     async def _find_resumable_session(
         self,
-        user_id: int,
+        user_id: str,
         working_directory: Path,
     ) -> Optional["ClaudeSession"]:  # noqa: F821
         """Find the most recent resumable session for a user in a directory.
@@ -190,7 +190,7 @@ class ClaudeIntegration:
 
     async def continue_session(
         self,
-        user_id: int,
+        user_id: str,
         working_directory: Path,
         prompt: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
@@ -231,12 +231,12 @@ class ClaudeIntegration:
         )
 
     async def get_session_info(
-        self, session_id: str, user_id: int
+        self, session_id: str, user_id: str
     ) -> Optional[Dict[str, Any]]:
         """Get session information (scoped to requesting user)."""
         return await self.session_manager.get_session_info(session_id, user_id)
 
-    async def get_user_sessions(self, user_id: int) -> List[Dict[str, Any]]:
+    async def get_user_sessions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all sessions for a user."""
         sessions = await self.session_manager._get_user_sessions(user_id)
         return [
@@ -257,7 +257,7 @@ class ClaudeIntegration:
         """Clean up expired sessions."""
         return await self.session_manager.cleanup_expired_sessions()
 
-    async def get_user_summary(self, user_id: int) -> Dict[str, Any]:
+    async def get_user_summary(self, user_id: str) -> Dict[str, Any]:
         """Get comprehensive user summary."""
         session_summary = await self.session_manager.get_user_session_summary(user_id)
 

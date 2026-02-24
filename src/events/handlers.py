@@ -1,7 +1,7 @@
-"""Event handlers that bridge the event bus to Claude and Telegram.
+"""Event handlers that bridge the event bus to Claude and Slack.
 
 AgentHandler: translates events into ClaudeIntegration.run_command() calls.
-NotificationHandler: subscribes to AgentResponseEvent and delivers to Telegram.
+NotificationHandler: subscribes to AgentResponseEvent and delivers to Slack.
 """
 
 from pathlib import Path
@@ -29,7 +29,7 @@ class AgentHandler:
         event_bus: EventBus,
         claude_integration: ClaudeIntegration,
         default_working_directory: Path,
-        default_user_id: int = 0,
+        default_user_id: str = "",
     ) -> None:
         self.event_bus = event_bus
         self.claude = claude_integration
@@ -63,13 +63,13 @@ class AgentHandler:
             )
 
             if response.content:
-                # We don't know which chat to send to from a webhook alone.
-                # The notification service needs configured target chats.
-                # Publish with chat_id=0 — the NotificationService
-                # will broadcast to configured notification_chat_ids.
+                # We don't know which channel to send to from a webhook alone.
+                # The notification service needs configured target channels.
+                # Publish with channel_id="" — the NotificationService
+                # will broadcast to configured notification_channel_ids.
                 await self.event_bus.publish(
                     AgentResponseEvent(
-                        chat_id=0,
+                        channel_id="",
                         text=response.content,
                         originating_event_id=event.id,
                     )
@@ -108,20 +108,20 @@ class AgentHandler:
             )
 
             if response.content:
-                for chat_id in event.target_chat_ids:
+                for channel_id in event.target_channel_ids:
                     await self.event_bus.publish(
                         AgentResponseEvent(
-                            chat_id=chat_id,
+                            channel_id=channel_id,
                             text=response.content,
                             originating_event_id=event.id,
                         )
                     )
 
-                # Also broadcast to default chats if no targets specified
-                if not event.target_chat_ids:
+                # Also broadcast to default channels if no targets specified
+                if not event.target_channel_ids:
                     await self.event_bus.publish(
                         AgentResponseEvent(
-                            chat_id=0,
+                            channel_id="",
                             text=response.content,
                             originating_event_id=event.id,
                         )

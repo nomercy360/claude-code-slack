@@ -1,16 +1,13 @@
-"""Tests for middleware handler stop behavior and bot-originated guards.
+"""Tests for Slack Bolt middleware handler stop behavior and bot-originated guards.
 
 Verifies that when middleware rejects a request (auth failure, security
-violation, rate limit exceeded), ApplicationHandlerStop is raised to
-prevent subsequent handler groups from processing the update.
-
-Regression tests for: https://github.com/RichardAtCT/claude-code-telegram/issues/44
+violation, rate limit exceeded), the next() callback is NOT called to
+prevent subsequent middleware and handlers from processing the event.
 """
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from telegram.ext import ApplicationHandlerStop
 
 from src.bot.core import ClaudeCodeBot
 from src.bot.middleware.rate_limit import estimate_message_cost
@@ -22,16 +19,11 @@ from src.config.settings import Settings
 def mock_settings():
     """Minimal Settings mock for ClaudeCodeBot."""
     settings = MagicMock(spec=Settings)
-    settings.telegram_token_str = "test:token"
-    settings.webhook_url = None
+    settings.slack_bot_token_str = "xoxb-test-token"
+    settings.slack_signing_secret_str = "test-signing-secret"
+    settings.slack_app_token_str = "xapp-test-token"
     settings.agentic_mode = True
-    settings.enable_quick_actions = False
     settings.enable_mcp = False
-    settings.enable_git_integration = False
-    settings.enable_file_uploads = False
-    settings.enable_session_export = False
-    settings.enable_image_uploads = False
-    settings.enable_conversation_mode = False
     settings.enable_api_server = False
     settings.enable_scheduler = False
     settings.approved_directory = "/tmp/test"
@@ -52,85 +44,103 @@ def bot(mock_settings):
     return ClaudeCodeBot(mock_settings, deps)
 
 
-@pytest.fixture
-def mock_update():
-    """Create a mock Telegram Update with an unauthenticated user."""
-    update = MagicMock()
-    update.effective_user = MagicMock()
-    update.effective_user.id = 999999
-    update.effective_user.username = "attacker"
-    update.effective_user.is_bot = False
-    update.effective_message = MagicMock()
-    update.effective_message.text = "hello"
-    update.effective_message.document = None
-    update.effective_message.photo = None
-    update.effective_message.reply_text = AsyncMock()
-    return update
+def _make_slack_body(user_id="U999999", text="hello", bot_id=None):
+    """Create a mock Slack event body."""
+    event = {"user": user_id, "text": text, "channel": "C123"}
+    if bot_id:
+        event["bot_id"] = bot_id
+    return {"event": event}
 
 
-@pytest.fixture
-def mock_context():
-    """Create a mock CallbackContext."""
-    context = MagicMock()
-    context.bot_data = {}
-    return context
+class TestMiddlewareBlocksSubsequentHandlers:
+    """Verify middleware rejection prevents next() from being called."""
 
+    async def test_auth_rejection_does_not_call_next(self, bot):
+        """Auth middleware must not call next() on rejection."""
 
-class TestMiddlewareBlocksSubsequentGroups:
-    """Verify middleware rejection raises ApplicationHandlerStop."""
-
-    async def test_auth_rejection_raises_handler_stop(
-        self, bot, mock_update, mock_context
-    ):
-        """Auth middleware must raise ApplicationHandlerStop on rejection."""
-
-        async def rejecting_auth(handler, event, data):
-            await event.effective_message.reply_text("Not authorized")
+        async def rejecting_auth(handler, body, data):
+            # Middleware does NOT call handler (next) -> rejection
             return
 
         wrapper = bot._create_middleware_handler(rejecting_auth)
 
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
+        next_called = False
 
-    async def test_security_rejection_raises_handler_stop(
-        self, bot, mock_update, mock_context
-    ):
-        """Security middleware must raise ApplicationHandlerStop on dangerous input."""
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
 
-        async def rejecting_security(handler, event, data):
-            await event.effective_message.reply_text("Blocked")
+        body = _make_slack_body()
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is False
+
+    async def test_security_rejection_does_not_call_next(self, bot):
+        """Security middleware must not call next() on dangerous input."""
+
+        async def rejecting_security(handler, body, data):
             return
 
         wrapper = bot._create_middleware_handler(rejecting_security)
 
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
+        next_called = False
 
-    async def test_rate_limit_rejection_raises_handler_stop(
-        self, bot, mock_update, mock_context
-    ):
-        """Rate limit middleware must raise ApplicationHandlerStop."""
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
 
-        async def rejecting_rate_limit(handler, event, data):
-            await event.effective_message.reply_text("Rate limited")
+        body = _make_slack_body()
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is False
+
+    async def test_rate_limit_rejection_does_not_call_next(self, bot):
+        """Rate limit middleware must not call next()."""
+
+        async def rejecting_rate_limit(handler, body, data):
             return
 
         wrapper = bot._create_middleware_handler(rejecting_rate_limit)
 
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
+        next_called = False
 
-    async def test_allowed_request_does_not_raise(self, bot, mock_update, mock_context):
-        """Middleware that calls the handler must NOT raise ApplicationHandlerStop."""
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
 
-        async def allowing_middleware(handler, event, data):
-            return await handler(event, data)
+        body = _make_slack_body()
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is False
+
+    async def test_allowed_request_calls_next(self, bot):
+        """Middleware that calls the handler must result in next() being called."""
+
+        async def allowing_middleware(handler, body, data):
+            return await handler()
 
         wrapper = bot._create_middleware_handler(allowing_middleware)
-        await wrapper(mock_update, mock_context)
 
-    async def test_real_auth_middleware_rejection(self, bot, mock_update, mock_context):
+        next_called = False
+
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
+
+        body = _make_slack_body()
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is True
+
+    async def test_real_auth_middleware_rejection(self, bot):
         """Integration test: actual auth_middleware rejects unauthorized user."""
         from src.bot.middleware.auth import auth_middleware
 
@@ -144,19 +154,20 @@ class TestMiddlewareBlocksSubsequentGroups:
 
         wrapper = bot._create_middleware_handler(auth_middleware)
 
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
+        next_called = False
 
-        mock_update.effective_message.reply_text.assert_called_once()
-        call_args = mock_update.effective_message.reply_text.call_args
-        assert (
-            "not authorized" in call_args[0][0].lower()
-            or "Authentication" in call_args[0][0]
-        )
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
 
-    async def test_real_auth_middleware_allows_authenticated_user(
-        self, bot, mock_update, mock_context
-    ):
+        body = _make_slack_body(user_id="U999999")
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is False
+
+    async def test_real_auth_middleware_allows_authenticated_user(self, bot):
         """Integration test: auth_middleware allows an authenticated user through."""
         from src.bot.middleware.auth import auth_middleware
 
@@ -167,11 +178,21 @@ class TestMiddlewareBlocksSubsequentGroups:
         bot.deps["auth_manager"] = auth_manager
 
         wrapper = bot._create_middleware_handler(auth_middleware)
-        await wrapper(mock_update, mock_context)
 
-    async def test_real_rate_limit_middleware_rejection(
-        self, bot, mock_update, mock_context
-    ):
+        next_called = False
+
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
+
+        body = _make_slack_body(user_id="U123456")
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is True
+
+    async def test_real_rate_limit_middleware_rejection(self, bot):
         """Integration test: rate_limit_middleware rejects when limit exceeded."""
         from src.bot.middleware.rate_limit import rate_limit_middleware
 
@@ -186,21 +207,37 @@ class TestMiddlewareBlocksSubsequentGroups:
 
         wrapper = bot._create_middleware_handler(rate_limit_middleware)
 
-        with pytest.raises(ApplicationHandlerStop):
-            await wrapper(mock_update, mock_context)
+        next_called = False
 
-    async def test_dependencies_injected_before_middleware_runs(
-        self, bot, mock_update, mock_context
-    ):
-        """Verify dependencies are available in bot_data when middleware executes."""
+        async def mock_next():
+            nonlocal next_called
+            next_called = True
+
+        body = _make_slack_body(user_id="U999999")
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
+        assert next_called is False
+
+    async def test_dependencies_injected_before_middleware_runs(self, bot):
+        """Verify dependencies are available in data when middleware executes."""
         captured_data = {}
 
-        async def capturing_middleware(handler, event, data):
+        async def capturing_middleware(handler, body, data):
             captured_data.update(data)
-            return await handler(event, data)
+            return await handler()
 
         wrapper = bot._create_middleware_handler(capturing_middleware)
-        await wrapper(mock_update, mock_context)
+
+        async def mock_next():
+            pass
+
+        body = _make_slack_body()
+        context = {}
+        client = AsyncMock()
+
+        await wrapper(body=body, next=mock_next, context=context, client=client)
 
         assert "auth_manager" in captured_data
         assert "security_validator" in captured_data
@@ -209,61 +246,70 @@ class TestMiddlewareBlocksSubsequentGroups:
 
 
 @pytest.mark.asyncio
-async def test_middleware_wrapper_stops_bot_originated_updates() -> None:
-    """Middleware wrapper should stop updates sent by bot users."""
+async def test_middleware_wrapper_stops_bot_originated_events() -> None:
+    """Middleware wrapper should skip events sent by bots."""
     settings = create_test_config()
     claude_bot = ClaudeCodeBot(settings, {})
 
     middleware_called = False
 
-    async def fake_middleware(handler, event, data):
+    async def fake_middleware(handler, body, data):
         nonlocal middleware_called
         middleware_called = True
-        return await handler(event, data)
+        return await handler()
 
     wrapper = claude_bot._create_middleware_handler(fake_middleware)
 
-    update = MagicMock()
-    update.effective_user = MagicMock(id=123, is_bot=True)
-    context = MagicMock()
-    context.bot_data = {}
+    next_called = False
 
-    with pytest.raises(ApplicationHandlerStop):
-        await wrapper(update, context)
+    async def mock_next():
+        nonlocal next_called
+        next_called = True
+
+    body = _make_slack_body(user_id="U123", bot_id="B123")
+    context = {}
+    client = AsyncMock()
+
+    await wrapper(body=body, next=mock_next, context=context, client=client)
 
     assert middleware_called is False
+    assert next_called is False
 
 
 @pytest.mark.asyncio
-async def test_middleware_wrapper_runs_for_non_bot_updates() -> None:
-    """Middleware wrapper should execute middleware for user updates."""
+async def test_middleware_wrapper_runs_for_user_events() -> None:
+    """Middleware wrapper should execute middleware for user events."""
     settings = create_test_config()
     claude_bot = ClaudeCodeBot(settings, {})
 
     middleware_called = False
 
-    async def allowing_middleware(handler, event, data):
+    async def allowing_middleware(handler, body, data):
         nonlocal middleware_called
         middleware_called = True
-        return await handler(event, data)
+        return await handler()
 
     wrapper = claude_bot._create_middleware_handler(allowing_middleware)
 
-    update = MagicMock()
-    update.effective_user = MagicMock(id=456, is_bot=False)
-    context = MagicMock()
-    context.bot_data = {}
+    next_called = False
 
-    await wrapper(update, context)
+    async def mock_next():
+        nonlocal next_called
+        next_called = True
+
+    body = _make_slack_body(user_id="U456")
+    context = {}
+    client = AsyncMock()
+
+    await wrapper(body=body, next=mock_next, context=context, client=client)
 
     assert middleware_called is True
 
 
-def test_estimate_message_cost_handles_none_text() -> None:
-    """Cost estimation should not fail on service-like messages without text."""
-    event = MagicMock()
-    event.effective_message = MagicMock(text=None, document=None, photo=None)
+def test_estimate_message_cost_handles_empty_text() -> None:
+    """Cost estimation should not fail on events without text."""
+    body = {"event": {"user": "U123", "channel": "C123"}}
 
-    cost = estimate_message_cost(event)
+    cost = estimate_message_cost(body)
 
     assert cost >= 0.01

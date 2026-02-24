@@ -1,7 +1,7 @@
 """Authentication system supporting multiple methods.
 
 Features:
-- Telegram ID whitelist
+- User ID whitelist
 - Token-based authentication
 - Session management
 - Audit logging
@@ -27,7 +27,7 @@ logger = structlog.get_logger()
 class UserSession:
     """User session data."""
 
-    user_id: int
+    user_id: str
     auth_provider: str
     created_at: datetime
     last_activity: datetime
@@ -51,7 +51,7 @@ class AuthProvider(ABC):
     """Base authentication provider."""
 
     @abstractmethod
-    async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
+    async def authenticate(self, user_id: str, credentials: Dict[str, Any]) -> bool:
         """Verify user credentials."""
 
     @abstractmethod
@@ -62,7 +62,7 @@ class AuthProvider(ABC):
 class WhitelistAuthProvider(AuthProvider):
     """Whitelist-based authentication."""
 
-    def __init__(self, allowed_users: List[int], allow_all_dev: bool = False):
+    def __init__(self, allowed_users: List[str], allow_all_dev: bool = False):
         self.allowed_users = set(allowed_users)
         self.allow_all_dev = allow_all_dev
         logger.info(
@@ -71,7 +71,7 @@ class WhitelistAuthProvider(AuthProvider):
             allow_all_dev=allow_all_dev,
         )
 
-    async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
+    async def authenticate(self, user_id: str, credentials: Dict[str, Any]) -> bool:
         """Authenticate user against whitelist."""
         is_allowed = self.allow_all_dev or user_id in self.allowed_users
         logger.info(
@@ -95,7 +95,7 @@ class TokenStorage(ABC):
 
     @abstractmethod
     async def store_token(
-        self, user_id: int, token_hash: str, expires_at: datetime
+        self, user_id: str, token_hash: str, expires_at: datetime
     ) -> None:
         """Store token hash for user."""
 
@@ -112,10 +112,10 @@ class InMemoryTokenStorage(TokenStorage):
     """In-memory token storage for development/testing."""
 
     def __init__(self) -> None:
-        self._tokens: Dict[int, Dict[str, Any]] = {}
+        self._tokens: Dict[str, Dict[str, Any]] = {}
 
     async def store_token(
-        self, user_id: int, token_hash: str, expires_at: datetime
+        self, user_id: str, token_hash: str, expires_at: datetime
     ) -> None:
         """Store token hash in memory."""
         self._tokens[user_id] = {
@@ -153,7 +153,7 @@ class TokenAuthProvider(AuthProvider):
         self.token_lifetime = token_lifetime
         logger.info("Token auth provider initialized")
 
-    async def authenticate(self, user_id: int, credentials: Dict[str, Any]) -> bool:
+    async def authenticate(self, user_id: str, credentials: Dict[str, Any]) -> bool:
         """Authenticate using token."""
         token = credentials.get("token")
         if not token:
@@ -221,11 +221,11 @@ class AuthenticationManager:
             raise SecurityError("At least one authentication provider is required")
 
         self.providers = providers
-        self.sessions: Dict[int, UserSession] = {}
+        self.sessions: Dict[str, UserSession] = {}
         logger.info("Authentication manager initialized", providers=len(self.providers))
 
     async def authenticate_user(
-        self, user_id: int, credentials: Optional[Dict[str, Any]] = None
+        self, user_id: str, credentials: Optional[Dict[str, Any]] = None
     ) -> bool:
         """Try authentication with all providers."""
         credentials = credentials or {}
@@ -255,7 +255,7 @@ class AuthenticationManager:
         logger.warning("Authentication failed for user", user_id=user_id)
         return False
 
-    async def _create_session(self, user_id: int, provider: AuthProvider) -> None:
+    async def _create_session(self, user_id: str, provider: AuthProvider) -> None:
         """Create authenticated session."""
         user_info = await provider.get_user_info(user_id)
         self.sessions[user_id] = UserSession(

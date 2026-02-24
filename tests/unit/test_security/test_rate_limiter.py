@@ -108,7 +108,7 @@ class TestRateLimiter:
 
     async def test_successful_rate_limit_check(self, rate_limiter):
         """Test successful rate limit check."""
-        user_id = 123
+        user_id = "U123"
 
         # First request should pass
         allowed, message = await rate_limiter.check_rate_limit(
@@ -123,7 +123,7 @@ class TestRateLimiter:
 
     async def test_request_rate_limit_exceeded(self, rate_limiter):
         """Test request rate limit exceeded."""
-        user_id = 123
+        user_id = "U123"
 
         # Consume all tokens
         bucket = rate_limiter._get_or_create_bucket(user_id)
@@ -137,7 +137,7 @@ class TestRateLimiter:
 
     async def test_cost_limit_exceeded(self, rate_limiter):
         """Test cost limit exceeded."""
-        user_id = 123
+        user_id = "U123"
 
         # Set cost near limit and set reset time to prevent auto-reset
         rate_limiter.cost_tracker[user_id] = 4.8
@@ -151,7 +151,7 @@ class TestRateLimiter:
 
     async def test_cost_tracking(self, rate_limiter):
         """Test cost tracking functionality."""
-        user_id = 123
+        user_id = "U123"
 
         # Track multiple costs
         await rate_limiter.check_rate_limit(user_id, cost=1.0)
@@ -162,7 +162,7 @@ class TestRateLimiter:
 
     async def test_user_limit_reset(self, rate_limiter):
         """Test resetting user limits."""
-        user_id = 123
+        user_id = "U123"
 
         # Set up some usage
         await rate_limiter.check_rate_limit(user_id, cost=2.0, tokens=5)
@@ -184,7 +184,7 @@ class TestRateLimiter:
 
     async def test_cost_tracker_auto_reset(self, rate_limiter):
         """Test automatic cost tracker reset after time period."""
-        user_id = 123
+        user_id = "U123"
 
         # Set old reset time
         old_time = datetime.now(UTC) - timedelta(days=2)
@@ -200,7 +200,7 @@ class TestRateLimiter:
 
     async def test_user_status_reporting(self, rate_limiter):
         """Test user status reporting."""
-        user_id = 123
+        user_id = "U123"
 
         # Set up some usage
         await rate_limiter.check_rate_limit(user_id, cost=2.0, tokens=3)
@@ -216,8 +216,8 @@ class TestRateLimiter:
     async def test_global_status_reporting(self, rate_limiter):
         """Test global status reporting."""
         # Set up multiple users
-        await rate_limiter.check_rate_limit(123, cost=1.0)
-        await rate_limiter.check_rate_limit(456, cost=2.0)
+        await rate_limiter.check_rate_limit("U123", cost=1.0)
+        await rate_limiter.check_rate_limit("U456", cost=2.0)
 
         status = rate_limiter.get_global_status()
 
@@ -231,7 +231,7 @@ class TestRateLimiter:
 
     async def test_cleanup_inactive_users(self, rate_limiter):
         """Test cleanup of inactive users."""
-        user_id = 123
+        user_id = "U123"
 
         # Create old bucket
         bucket = rate_limiter._get_or_create_bucket(user_id)
@@ -249,7 +249,7 @@ class TestRateLimiter:
         """Test concurrent access to rate limiter."""
         import asyncio
 
-        user_id = 123
+        user_id = "U123"
 
         async def make_request():
             return await rate_limiter.check_rate_limit(user_id, cost=0.1, tokens=1)
@@ -267,7 +267,7 @@ class TestRateLimiter:
 
     async def test_bucket_creation_per_user(self, rate_limiter):
         """Test that buckets are created per user."""
-        user1, user2 = 123, 456
+        user1, user2 = "U123", "U456"
 
         # Make requests for different users
         await rate_limiter.check_rate_limit(user1, cost=1.0)
@@ -281,7 +281,7 @@ class TestRateLimiter:
 
     async def test_edge_case_zero_cost(self, rate_limiter):
         """Test handling of zero cost requests."""
-        user_id = 123
+        user_id = "U123"
 
         allowed, message = await rate_limiter.check_rate_limit(user_id, cost=0.0)
         assert allowed is True
@@ -289,7 +289,7 @@ class TestRateLimiter:
 
     async def test_edge_case_large_token_request(self, rate_limiter):
         """Test handling of large token requests."""
-        user_id = 123
+        user_id = "U123"
 
         # Request more tokens than bucket capacity
         bucket = rate_limiter._get_or_create_bucket(user_id)

@@ -36,7 +36,7 @@ class ClaudeSession:
     """Claude Code session state."""
 
     session_id: str
-    user_id: int
+    user_id: str
     project_path: Path
     created_at: datetime
     last_used: datetime
@@ -103,7 +103,7 @@ class SessionStorage:
         raise NotImplementedError
 
     async def load_session(
-        self, session_id: str, user_id: int
+        self, session_id: str, user_id: str
     ) -> Optional[ClaudeSession]:
         """Load session from storage.
 
@@ -118,7 +118,7 @@ class SessionStorage:
         """Delete session from storage."""
         raise NotImplementedError
 
-    async def get_user_sessions(self, user_id: int) -> List[ClaudeSession]:
+    async def get_user_sessions(self, user_id: str) -> List[ClaudeSession]:
         """Get all sessions for a user."""
         raise NotImplementedError
 
@@ -140,7 +140,7 @@ class InMemorySessionStorage(SessionStorage):
         logger.debug("Session saved to memory", session_id=session.session_id)
 
     async def load_session(
-        self, session_id: str, user_id: int
+        self, session_id: str, user_id: str
     ) -> Optional[ClaudeSession]:
         """Load session from memory, verifying ownership."""
         session = self.sessions.get(session_id)
@@ -162,7 +162,7 @@ class InMemorySessionStorage(SessionStorage):
             del self.sessions[session_id]
             logger.debug("Session deleted from memory", session_id=session_id)
 
-    async def get_user_sessions(self, user_id: int) -> List[ClaudeSession]:
+    async def get_user_sessions(self, user_id: str) -> List[ClaudeSession]:
         """Get all sessions for a user."""
         return [
             session for session in self.sessions.values() if session.user_id == user_id
@@ -184,7 +184,7 @@ class SessionManager:
 
     async def get_or_create_session(
         self,
-        user_id: int,
+        user_id: str,
         project_path: Path,
         session_id: Optional[str] = None,
     ) -> ClaudeSession:
@@ -315,11 +315,11 @@ class SessionManager:
         logger.info("Session cleanup completed", expired_sessions=expired_count)
         return expired_count
 
-    async def _get_user_sessions(self, user_id: int) -> List[ClaudeSession]:
+    async def _get_user_sessions(self, user_id: str) -> List[ClaudeSession]:
         """Get all sessions for a user."""
         return await self.storage.get_user_sessions(user_id)
 
-    async def get_session_info(self, session_id: str, user_id: int) -> Optional[Dict]:
+    async def get_session_info(self, session_id: str, user_id: str) -> Optional[Dict]:
         """Get session information.
 
         Args:
@@ -356,7 +356,7 @@ class SessionManager:
 
         return None
 
-    async def get_user_session_summary(self, user_id: int) -> Dict:
+    async def get_user_session_summary(self, user_id: str) -> Dict:
         """Get summary of user's sessions."""
         sessions = await self._get_user_sessions(user_id)
 

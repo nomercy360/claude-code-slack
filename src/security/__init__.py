@@ -1,4 +1,4 @@
-"""Security framework for Claude Code Telegram Bot.
+"""Security framework for Claude Code Slack Bot.
 
 This module provides comprehensive security features including:
 - Multi-layer authentication (whitelist and token-based)

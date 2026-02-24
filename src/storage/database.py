@@ -35,8 +35,8 @@ INITIAL_SCHEMA = """
 
 -- Users table
 CREATE TABLE users (
-    user_id INTEGER PRIMARY KEY,
-    telegram_username TEXT,
+    user_id TEXT PRIMARY KEY,
+    slack_username TEXT,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_allowed BOOLEAN DEFAULT FALSE,
@@ -48,7 +48,7 @@ CREATE TABLE users (
 -- Sessions table
 CREATE TABLE sessions (
     session_id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     project_path TEXT NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_used TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -63,7 +63,7 @@ CREATE TABLE sessions (
 CREATE TABLE messages (
     message_id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     prompt TEXT NOT NULL,
     response TEXT,
@@ -91,7 +91,7 @@ CREATE TABLE tool_usage (
 -- Audit log table
 CREATE TABLE audit_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     event_data JSON,
     success BOOLEAN DEFAULT TRUE,
@@ -103,7 +103,7 @@ CREATE TABLE audit_log (
 -- User tokens table (for token auth)
 CREATE TABLE user_tokens (
     token_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP,
@@ -115,7 +115,7 @@ CREATE TABLE user_tokens (
 -- Cost tracking table
 CREATE TABLE cost_tracking (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
     date DATE NOT NULL,
     daily_cost REAL DEFAULT 0.0,
     request_count INTEGER DEFAULT 0,
@@ -233,7 +233,7 @@ class DatabaseManager:
                 CREATE VIEW IF NOT EXISTS user_stats AS
                 SELECT
                     u.user_id,
-                    u.telegram_username,
+                    u.slack_username,
                     COUNT(DISTINCT s.session_id) as total_sessions,
                     COUNT(m.message_id) as total_messages,
                     SUM(m.cost) as total_cost,
@@ -290,22 +290,22 @@ class DatabaseManager:
             (
                 4,
                 """
-                -- Project thread mapping for strict forum-topic routing
+                -- Project thread mapping for strict channel routing
                 CREATE TABLE IF NOT EXISTS project_threads (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_slug TEXT NOT NULL,
-                    chat_id INTEGER NOT NULL,
-                    message_thread_id INTEGER NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    thread_ts TEXT NOT NULL,
                     topic_name TEXT NOT NULL,
                     is_active BOOLEAN DEFAULT TRUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(chat_id, project_slug),
-                    UNIQUE(chat_id, message_thread_id)
+                    UNIQUE(channel_id, project_slug),
+                    UNIQUE(channel_id, thread_ts)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_project_threads_chat_active
-                    ON project_threads(chat_id, is_active);
+                CREATE INDEX IF NOT EXISTS idx_project_threads_channel_active
+                    ON project_threads(channel_id, is_active);
                 CREATE INDEX IF NOT EXISTS idx_project_threads_slug
                     ON project_threads(project_slug);
                 """,

@@ -17,14 +17,14 @@ class TestClaudeSession:
         """Test session creation."""
         session = ClaudeSession(
             session_id="test-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
         )
 
         assert session.session_id == "test-session"
-        assert session.user_id == 123
+        assert session.user_id == "U123"
         assert session.project_path == Path("/test/path")
         assert session.total_cost == 0.0
         assert session.total_turns == 0
@@ -38,7 +38,7 @@ class TestClaudeSession:
 
         session = ClaudeSession(
             session_id="test-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=old_time,
             last_used=old_time,
@@ -52,7 +52,7 @@ class TestClaudeSession:
         """Test usage update."""
         session = ClaudeSession(
             session_id="test-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
@@ -79,7 +79,7 @@ class TestClaudeSession:
         """Test serialization/deserialization."""
         original = ClaudeSession(
             session_id="test-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
@@ -105,7 +105,7 @@ class TestClaudeSession:
         """Legacy naive timestamps should be normalized to UTC-aware datetimes."""
         data = {
             "session_id": "test-session",
-            "user_id": 123,
+            "user_id": "U123",
             "project_path": "/test/path",
             "created_at": "2026-02-18T10:00:00",
             "last_used": "2026-02-18T10:30:00",
@@ -128,7 +128,7 @@ class TestClaudeSession:
         naive_old = (now_utc - timedelta(hours=30)).replace(tzinfo=None)
         session = ClaudeSession(
             session_id="legacy-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=naive_old,
             last_used=naive_old,
@@ -150,7 +150,7 @@ class TestInMemorySessionStorage:
         """Create sample session."""
         return ClaudeSession(
             session_id="test-session",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
@@ -162,14 +162,14 @@ class TestInMemorySessionStorage:
         await storage.save_session(sample_session)
 
         # Load session with correct user_id
-        loaded = await storage.load_session("test-session", user_id=123)
+        loaded = await storage.load_session("test-session", user_id="U123")
         assert loaded is not None
         assert loaded.session_id == sample_session.session_id
         assert loaded.user_id == sample_session.user_id
 
     async def test_load_nonexistent_session(self, storage):
         """Test loading non-existent session."""
-        result = await storage.load_session("nonexistent", user_id=123)
+        result = await storage.load_session("nonexistent", user_id="U123")
         assert result is None
 
     async def test_load_session_wrong_user(self, storage, sample_session):
@@ -177,7 +177,7 @@ class TestInMemorySessionStorage:
         await storage.save_session(sample_session)
 
         # Load with wrong user_id should return None
-        result = await storage.load_session("test-session", user_id=999)
+        result = await storage.load_session("test-session", user_id="U999")
         assert result is None
 
     async def test_delete_session(self, storage, sample_session):
@@ -187,7 +187,7 @@ class TestInMemorySessionStorage:
         await storage.delete_session("test-session")
 
         # Should no longer exist
-        result = await storage.load_session("test-session", user_id=123)
+        result = await storage.load_session("test-session", user_id="U123")
         assert result is None
 
     async def test_get_user_sessions(self, storage):
@@ -195,21 +195,21 @@ class TestInMemorySessionStorage:
         # Create sessions for different users
         session1 = ClaudeSession(
             session_id="session1",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path1"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
         )
         session2 = ClaudeSession(
             session_id="session2",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/path2"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
         )
         session3 = ClaudeSession(
             session_id="session3",
-            user_id=456,
+            user_id="U456",
             project_path=Path("/test/path3"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
@@ -219,15 +219,15 @@ class TestInMemorySessionStorage:
         await storage.save_session(session2)
         await storage.save_session(session3)
 
-        # Get sessions for user 123
-        user_sessions = await storage.get_user_sessions(123)
+        # Get sessions for user U123
+        user_sessions = await storage.get_user_sessions("U123")
         assert len(user_sessions) == 2
-        assert all(s.user_id == 123 for s in user_sessions)
+        assert all(s.user_id == "U123" for s in user_sessions)
 
-        # Get sessions for user 456
-        user_sessions = await storage.get_user_sessions(456)
+        # Get sessions for user U456
+        user_sessions = await storage.get_user_sessions("U456")
         assert len(user_sessions) == 1
-        assert user_sessions[0].user_id == 456
+        assert user_sessions[0].user_id == "U456"
 
 
 class TestSessionManager:
@@ -237,8 +237,8 @@ class TestSessionManager:
     def config(self, tmp_path):
         """Create test config."""
         return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
+            slack_bot_token="xoxb-test-token",
+            slack_app_token="xapp-test-token",
             approved_directory=tmp_path,
             session_timeout_hours=24,
             max_sessions_per_user=2,
@@ -257,11 +257,11 @@ class TestSessionManager:
     async def test_create_new_session(self, session_manager):
         """Test creating new session."""
         session = await session_manager.get_or_create_session(
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/project"),
         )
 
-        assert session.user_id == 123
+        assert session.user_id == "U123"
         assert session.project_path == Path("/test/project")
         assert session.is_new_session is True
         assert session.session_id == ""  # Empty until Claude responds
@@ -271,7 +271,7 @@ class TestSessionManager:
         # Simulate a session that has already received a real ID from Claude
         existing = ClaudeSession(
             session_id="real-session-id",
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/project"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
@@ -281,7 +281,7 @@ class TestSessionManager:
 
         # Get same session by ID
         session2 = await session_manager.get_or_create_session(
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/project"),
             session_id="real-session-id",
         )
@@ -295,7 +295,7 @@ class TestSessionManager:
         for i, path in enumerate(["/test/project1", "/test/project2"], start=1):
             s = ClaudeSession(
                 session_id=f"session-{i}",
-                user_id=123,
+                user_id="U123",
                 project_path=Path(path),
                 created_at=datetime.now(UTC),
                 last_used=datetime.now(UTC) - timedelta(hours=i),  # older = higher i
@@ -304,67 +304,69 @@ class TestSessionManager:
             session_manager.active_sessions[s.session_id] = s
 
         # Verify we have 2 sessions
-        assert len(await session_manager._get_user_sessions(123)) == 2
+        assert len(await session_manager._get_user_sessions("U123")) == 2
 
         # Creating third session should remove the oldest (session-2)
         await session_manager.get_or_create_session(
-            user_id=123, project_path=Path("/test/project3")
+            user_id="U123", project_path=Path("/test/project3")
         )
 
         # After eviction, only session-1 remains persisted
         # (session-2 evicted, session-3 is new/unsaved so not yet in storage)
-        persisted = await session_manager._get_user_sessions(123)
+        persisted = await session_manager._get_user_sessions("U123")
         assert len(persisted) == 1  # Only session-1 persisted
         assert persisted[0].session_id == "session-1"
 
         # session-2 should be gone
-        loaded = await session_manager.storage.load_session("session-2", user_id=123)
+        loaded = await session_manager.storage.load_session(
+            "session-2", user_id="U123"
+        )
         assert loaded is None
 
     async def test_get_or_create_rejects_wrong_user_active_cache(self, session_manager):
         """Requesting another user's session via active cache creates a new one."""
         existing = ClaudeSession(
             session_id="other-user-session",
-            user_id=999,
+            user_id="U999",
             project_path=Path("/test/project"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
         )
         session_manager.active_sessions["other-user-session"] = existing
 
-        # User 123 tries to resume user 999's session
+        # User U123 tries to resume user U999's session
         session = await session_manager.get_or_create_session(
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/project"),
             session_id="other-user-session",
         )
 
         # Should get a new session, not the other user's
         assert session.session_id != "other-user-session"
-        assert session.user_id == 123
+        assert session.user_id == "U123"
         assert session.is_new_session is True
 
     async def test_get_or_create_rejects_wrong_user_from_storage(self, session_manager):
         """Requesting another user's session via storage creates a new one."""
         existing = ClaudeSession(
             session_id="stored-other-session",
-            user_id=999,
+            user_id="U999",
             project_path=Path("/test/project"),
             created_at=datetime.now(UTC),
             last_used=datetime.now(UTC),
         )
         await session_manager.storage.save_session(existing)
 
-        # User 123 tries to resume user 999's session
+        # User U123 tries to resume user U999's session
         session = await session_manager.get_or_create_session(
-            user_id=123,
+            user_id="U123",
             project_path=Path("/test/project"),
             session_id="stored-other-session",
         )
 
         # Should get a new session, not the other user's
         assert session.session_id != "stored-other-session"
-        assert session.user_id == 123
+        assert session.user_id == "U123"
         assert session.is_new_session is True
 
 
@@ -374,8 +376,8 @@ class TestUpdateSessionNewWithoutId:
     @pytest.fixture
     def config(self, tmp_path):
         return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
+            slack_bot_token="xoxb-test-token",
+            slack_app_token="xapp-test-token",
             approved_directory=tmp_path,
             session_timeout_hours=24,
             max_sessions_per_user=2,
@@ -388,7 +390,7 @@ class TestUpdateSessionNewWithoutId:
     async def test_warns_and_does_not_persist(self, session_manager):
         """When Claude returns no session_id, session is not persisted."""
         session = await session_manager.get_or_create_session(
-            user_id=999, project_path=Path("/test/no-id")
+            user_id="U999", project_path=Path("/test/no-id")
         )
         assert session.is_new_session is True
 
@@ -408,5 +410,5 @@ class TestUpdateSessionNewWithoutId:
 
         # Session should NOT be persisted (empty session_id)
         assert len(session_manager.active_sessions) == 0
-        persisted = await session_manager._get_user_sessions(999)
+        persisted = await session_manager._get_user_sessions("U999")
         assert len(persisted) == 0

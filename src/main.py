@@ -1,4 +1,4 @@
-"""Main entry point for Claude Code Telegram Bot."""
+"""Main entry point for Claude Code Slack Bot."""
 
 import argparse
 import asyncio
@@ -77,12 +77,12 @@ def setup_logging(debug: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Claude Code Telegram Bot",
+        description="Claude Code Slack Bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
     parser.add_argument(
-        "--version", action="version", version=f"Claude Code Telegram Bot {__version__}"
+        "--version", action="version", version=f"Claude Code Slack Bot {__version__}"
     )
 
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -112,7 +112,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
 
     # Add token provider if enabled
     if config.enable_token_auth:
-        token_storage = InMemoryTokenStorage()  # TODO: Use database storage
+        token_storage = InMemoryTokenStorage()
         providers.append(TokenAuthProvider(config.auth_token_secret, token_storage))
 
     # Fall back to allowing all users in development mode
@@ -133,7 +133,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     rate_limiter = RateLimiter(config)
 
     # Create audit storage and logger
-    audit_storage = InMemoryAuditStorage()  # TODO: Use database storage in production
+    audit_storage = InMemoryAuditStorage()
     audit_logger = AuditLogger(audit_storage)
 
     # Create Claude integration components with persistent storage
@@ -166,7 +166,7 @@ async def create_application(config: Settings) -> Dict[str, Any]:
         event_bus=event_bus,
         claude_integration=claude_integration,
         default_working_directory=config.approved_directory,
-        default_user_id=config.allowed_users[0] if config.allowed_users else 0,
+        default_user_id=config.allowed_users[0] if config.allowed_users else "",
     )
     agent_handler.register()
 
@@ -184,10 +184,6 @@ async def create_application(config: Settings) -> Dict[str, Any]:
     }
 
     bot = ClaudeCodeBot(config, dependencies)
-
-    # Notification service and scheduler need the bot's Telegram Bot instance,
-    # which is only available after bot.initialize(). We store placeholders
-    # and wire them up in run_application() after initialization.
 
     logger.info("Application components created successfully")
 
@@ -229,9 +225,9 @@ async def run_application(app: Dict[str, Any]) -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        logger.info("Starting Claude Code Telegram Bot")
+        logger.info("Starting Claude Code Slack Bot")
 
-        # Initialize the bot first (creates the Telegram Application)
+        # Initialize the bot first (creates the Slack Bolt AsyncApp)
         await bot.initialize()
 
         if config.enable_project_threads:
@@ -255,18 +251,18 @@ async def run_application(app: Dict[str, Any]) -> None:
             bot.deps["project_threads_manager"] = project_threads_manager
 
             if config.project_threads_mode == "group":
-                if config.project_threads_chat_id is None:
+                if config.project_threads_channel_id is None:
                     raise ConfigurationError(
-                        "Group thread mode requires PROJECT_THREADS_CHAT_ID"
+                        "Group thread mode requires PROJECT_THREADS_CHANNEL_ID"
                     )
-                sync_result = await project_threads_manager.sync_topics(
-                    bot.app.bot,
-                    chat_id=config.project_threads_chat_id,
+                sync_result = await project_threads_manager.sync_channels(
+                    bot.app.client,
+                    channel_id=config.project_threads_channel_id,
                 )
                 logger.info(
-                    "Project thread startup sync complete",
+                    "Project channel startup sync complete",
                     mode=config.project_threads_mode,
-                    chat_id=config.project_threads_chat_id,
+                    channel_id=config.project_threads_channel_id,
                     created=sync_result.created,
                     reused=sync_result.reused,
                     renamed=sync_result.renamed,
@@ -274,8 +270,10 @@ async def run_application(app: Dict[str, Any]) -> None:
                     deactivated=sync_result.deactivated,
                 )
 
-        # Now wire up components that need the Telegram Bot instance
-        telegram_bot = bot.app.bot
+        # Create Slack Web client for notification service
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        slack_client = AsyncWebClient(token=config.slack_bot_token_str)
 
         # Start event bus
         await event_bus.start()
@@ -283,8 +281,8 @@ async def run_application(app: Dict[str, Any]) -> None:
         # Notification service
         notification_service = NotificationService(
             event_bus=event_bus,
-            bot=telegram_bot,
-            default_chat_ids=config.notification_chat_ids or [],
+            client=slack_client,
+            default_channel_ids=config.notification_channel_ids or [],
         )
         notification_service.register()
         await notification_service.start()
@@ -292,7 +290,7 @@ async def run_application(app: Dict[str, Any]) -> None:
         # Collect concurrent tasks
         tasks = []
 
-        # Bot task — use start() which handles its own initialization check
+        # Bot task — Socket Mode
         bot_task = asyncio.create_task(bot.start())
         tasks.append(bot_task)
 
@@ -348,7 +346,7 @@ async def run_application(app: Dict[str, Any]) -> None:
         logger.error("Application error", error=str(e))
         raise
     finally:
-        # Ordered shutdown: scheduler -> API -> notification -> bot -> claude -> storage
+        # Ordered shutdown
         logger.info("Shutting down application")
 
         try:
@@ -372,7 +370,7 @@ async def main() -> None:
     setup_logging(debug=args.debug)
 
     logger = structlog.get_logger()
-    logger.info("Starting Claude Code Telegram Bot", version=__version__)
+    logger.info("Starting Claude Code Slack Bot", version=__version__)
 
     try:
         # Load configuration

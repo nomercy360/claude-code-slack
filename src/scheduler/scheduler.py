@@ -61,10 +61,10 @@ class JobScheduler:
             job_name: Human-readable job name.
             cron_expression: Cron-style schedule (e.g. "0 9 * * 1-5").
             prompt: The prompt to send to Claude when the job fires.
-            target_chat_ids: Telegram chat IDs to send the response to.
+            target_chat_ids: Slack channel IDs to send the response to.
             working_directory: Working directory for Claude execution.
             skill_name: Optional skill to invoke.
-            created_by: Telegram user ID of the creator.
+            created_by: Slack user ID of the creator.
 
         Returns:
             The job ID.

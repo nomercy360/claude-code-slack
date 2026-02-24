@@ -1,31 +1,19 @@
-"""Message orchestrator — single entry point for all Telegram updates.
+"""Message orchestrator — single entry point for all Slack events.
 
-Routes messages based on agentic vs classic mode. In agentic mode, provides
-a minimal conversational interface (3 commands, no inline keyboards). In
-classic mode, delegates to existing full-featured handlers.
+Routes messages to Claude in agentic mode. Provides a minimal conversational
+interface (slash commands + message events, no inline keyboards).
 """
 
 import asyncio
 import re
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from slack_bolt.async_app import AsyncApp
 
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
-from ..projects import PrivateTopicsUnavailableError
-from .utils.html_format import escape_html
 
 logger = structlog.get_logger()
 
@@ -97,455 +85,337 @@ def _tool_icon(name: str) -> str:
     return _TOOL_ICONS.get(name, "\U0001f527")
 
 
+def _escape_mrkdwn(text: str) -> str:
+    """Minimal escaping for Slack mrkdwn special characters."""
+    # Only escape &, <, > which are the truly special chars in Slack mrkdwn
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class MessageOrchestrator:
-    """Routes messages based on mode. Single entry point for all Telegram updates."""
+    """Routes Slack events to Claude. Agentic mode only."""
 
     def __init__(self, settings: Settings, deps: Dict[str, Any]):
         self.settings = settings
         self.deps = deps
+        # Per-user state (keyed by Slack user ID)
+        self._user_state: Dict[str, Dict[str, Any]] = {}
 
-    def _inject_deps(self, handler: Callable) -> Callable:  # type: ignore[type-arg]
-        """Wrap handler to inject dependencies into context.bot_data."""
+    def _get_user_state(self, user_id: str) -> Dict[str, Any]:
+        """Get or create per-user state dict."""
+        if user_id not in self._user_state:
+            self._user_state[user_id] = {
+                "current_directory": self.settings.approved_directory,
+                "claude_session_id": None,
+                "force_new_session": False,
+                "verbose_level": None,  # None = use global default
+            }
+        return self._user_state[user_id]
 
-        async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-            for key, value in self.deps.items():
-                context.bot_data[key] = value
-            context.bot_data["settings"] = self.settings
-            context.user_data.pop("_thread_context", None)
+    def register_handlers(self, app: AsyncApp) -> None:
+        """Register Slack Bolt handlers (agentic mode only)."""
+        # Slash commands
+        app.command("/claude-start")(self.agentic_start)
+        app.command("/claude-new")(self.agentic_new)
+        app.command("/claude-status")(self.agentic_status)
+        app.command("/claude-verbose")(self.agentic_verbose)
+        app.command("/claude-repo")(self.agentic_repo)
 
-            is_sync_bypass = handler.__name__ == "sync_threads"
-            is_start_bypass = handler.__name__ in {"start_command", "agentic_start"}
-            message_thread_id = self._extract_message_thread_id(update)
-            should_enforce = self.settings.enable_project_threads
+        # Message events -> Claude
+        app.event("message")(self.handle_message_event)
 
-            if should_enforce:
-                if self.settings.project_threads_mode == "private":
-                    should_enforce = not is_sync_bypass and not (
-                        is_start_bypass and message_thread_id is None
-                    )
-                else:
-                    should_enforce = not is_sync_bypass
-
-            if should_enforce:
-                allowed = await self._apply_thread_routing_context(update, context)
-                if not allowed:
-                    return
-
-            try:
-                await handler(update, context)
-            finally:
-                if should_enforce:
-                    self._persist_thread_state(context)
-
-        return wrapped
-
-    async def _apply_thread_routing_context(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> bool:
-        """Enforce strict project-thread routing and load thread-local state."""
-        manager = context.bot_data.get("project_threads_manager")
-        if manager is None:
-            await self._reject_for_thread_mode(
-                update,
-                "❌ <b>Project Thread Mode Misconfigured</b>\n\n"
-                "Thread manager is not initialized.",
-            )
-            return False
-
-        chat = update.effective_chat
-        message = update.effective_message
-        if not chat or not message:
-            return False
-
-        if self.settings.project_threads_mode == "group":
-            if chat.id != self.settings.project_threads_chat_id:
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-        else:
-            if getattr(chat, "type", "") != "private":
-                await self._reject_for_thread_mode(
-                    update,
-                    manager.guidance_message(mode=self.settings.project_threads_mode),
-                )
-                return False
-
-        message_thread_id = self._extract_message_thread_id(update)
-        if not message_thread_id:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        project = await manager.resolve_project(chat.id, message_thread_id)
-        if not project:
-            await self._reject_for_thread_mode(
-                update,
-                manager.guidance_message(mode=self.settings.project_threads_mode),
-            )
-            return False
-
-        state_key = f"{chat.id}:{message_thread_id}"
-        thread_states = context.user_data.setdefault("thread_state", {})
-        state = thread_states.get(state_key, {})
-
-        project_root = project.absolute_path
-        current_dir_raw = state.get("current_directory")
-        current_dir = (
-            Path(current_dir_raw).resolve() if current_dir_raw else project_root
-        )
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        context.user_data["current_directory"] = current_dir
-        context.user_data["claude_session_id"] = state.get("claude_session_id")
-        context.user_data["_thread_context"] = {
-            "chat_id": chat.id,
-            "message_thread_id": message_thread_id,
-            "state_key": state_key,
-            "project_slug": project.slug,
-            "project_root": str(project_root),
-            "project_name": project.name,
-        }
-        return True
-
-    def _persist_thread_state(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Persist compatibility keys back into per-thread state."""
-        thread_context = context.user_data.get("_thread_context")
-        if not thread_context:
-            return
-
-        project_root = Path(thread_context["project_root"])
-        current_dir = context.user_data.get("current_directory", project_root)
-        if not isinstance(current_dir, Path):
-            current_dir = Path(str(current_dir))
-        current_dir = current_dir.resolve()
-        if not self._is_within(current_dir, project_root) or not current_dir.is_dir():
-            current_dir = project_root
-
-        thread_states = context.user_data.setdefault("thread_state", {})
-        thread_states[thread_context["state_key"]] = {
-            "current_directory": str(current_dir),
-            "claude_session_id": context.user_data.get("claude_session_id"),
-            "project_slug": thread_context["project_slug"],
-        }
-
-    @staticmethod
-    def _is_within(path: Path, root: Path) -> bool:
-        """Return True if path is within root."""
-        try:
-            path.relative_to(root)
-            return True
-        except ValueError:
-            return False
-
-    @staticmethod
-    def _extract_message_thread_id(update: Update) -> Optional[int]:
-        """Extract topic/thread id from update message for forum/direct topics."""
-        message = update.effective_message
-        if not message:
-            return None
-        message_thread_id = getattr(message, "message_thread_id", None)
-        if isinstance(message_thread_id, int) and message_thread_id > 0:
-            return message_thread_id
-        dm_topic = getattr(message, "direct_messages_topic", None)
-        topic_id = getattr(dm_topic, "topic_id", None) if dm_topic else None
-        if isinstance(topic_id, int) and topic_id > 0:
-            return topic_id
-        return None
-
-    async def _reject_for_thread_mode(self, update: Update, message: str) -> None:
-        """Send a guidance response when strict thread routing rejects an update."""
-        query = update.callback_query
-        if query:
-            try:
-                await query.answer()
-            except Exception:
-                pass
-            if query.message:
-                await query.message.reply_text(message, parse_mode="HTML")
-            return
-
-        if update.effective_message:
-            await update.effective_message.reply_text(message, parse_mode="HTML")
-
-    def register_handlers(self, app: Application) -> None:
-        """Register handlers based on mode."""
-        if self.settings.agentic_mode:
-            self._register_agentic_handlers(app)
-        else:
-            self._register_classic_handlers(app)
-
-    def _register_agentic_handlers(self, app: Application) -> None:
-        """Register agentic handlers: commands + text/file/photo."""
-        from .handlers import command
-
-        # Commands
-        handlers = [
-            ("start", self.agentic_start),
-            ("new", self.agentic_new),
-            ("status", self.agentic_status),
-            ("verbose", self.agentic_verbose),
-            ("repo", self.agentic_repo),
-        ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
-
-        for cmd, handler in handlers:
-            app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
-
-        # Text messages -> Claude
-        app.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._inject_deps(self.agentic_text),
-            ),
-            group=10,
-        )
-
-        # File uploads -> Claude
-        app.add_handler(
-            MessageHandler(
-                filters.Document.ALL, self._inject_deps(self.agentic_document)
-            ),
-            group=10,
-        )
-
-        # Photo uploads -> Claude
-        app.add_handler(
-            MessageHandler(filters.PHOTO, self._inject_deps(self.agentic_photo)),
-            group=10,
-        )
-
-        # Only cd: callbacks (for project selection), scoped by pattern
-        app.add_handler(
-            CallbackQueryHandler(
-                self._inject_deps(self._agentic_callback),
-                pattern=r"^cd:",
-            )
-        )
+        # Block Kit action buttons (repo selection)
+        app.action(re.compile(r"^cd:"))(self.handle_repo_action)
 
         logger.info("Agentic handlers registered")
 
-    def _register_classic_handlers(self, app: Application) -> None:
-        """Register full classic handler set (moved from core.py)."""
-        from .handlers import callback, command, message
-
-        handlers = [
-            ("start", command.start_command),
-            ("help", command.help_command),
-            ("new", command.new_session),
-            ("continue", command.continue_session),
-            ("end", command.end_session),
-            ("ls", command.list_files),
-            ("cd", command.change_directory),
-            ("pwd", command.print_working_directory),
-            ("projects", command.show_projects),
-            ("status", command.session_status),
-            ("export", command.export_session),
-            ("actions", command.quick_actions),
-            ("git", command.git_command),
-        ]
-        if self.settings.enable_project_threads:
-            handlers.append(("sync_threads", command.sync_threads))
-
-        for cmd, handler in handlers:
-            app.add_handler(CommandHandler(cmd, self._inject_deps(handler)))
-
-        app.add_handler(
-            MessageHandler(
-                filters.TEXT & ~filters.COMMAND,
-                self._inject_deps(message.handle_text_message),
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(
-                filters.Document.ALL, self._inject_deps(message.handle_document)
-            ),
-            group=10,
-        )
-        app.add_handler(
-            MessageHandler(filters.PHOTO, self._inject_deps(message.handle_photo)),
-            group=10,
-        )
-        app.add_handler(
-            CallbackQueryHandler(self._inject_deps(callback.handle_callback_query))
-        )
-
-        logger.info("Classic handlers registered (13 commands + full handler set)")
-
-    async def get_bot_commands(self) -> list:  # type: ignore[type-arg]
-        """Return bot commands appropriate for current mode."""
-        if self.settings.agentic_mode:
-            commands = [
-                BotCommand("start", "Start the bot"),
-                BotCommand("new", "Start a fresh session"),
-                BotCommand("status", "Show session status"),
-                BotCommand("verbose", "Set output verbosity (0/1/2)"),
-                BotCommand("repo", "List repos / switch workspace"),
-            ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
-            return commands
-        else:
-            commands = [
-                BotCommand("start", "Start bot and show help"),
-                BotCommand("help", "Show available commands"),
-                BotCommand("new", "Clear context and start fresh session"),
-                BotCommand("continue", "Explicitly continue last session"),
-                BotCommand("end", "End current session and clear context"),
-                BotCommand("ls", "List files in current directory"),
-                BotCommand("cd", "Change directory (resumes project session)"),
-                BotCommand("pwd", "Show current directory"),
-                BotCommand("projects", "Show all projects"),
-                BotCommand("status", "Show session status"),
-                BotCommand("export", "Export current session"),
-                BotCommand("actions", "Show quick actions"),
-                BotCommand("git", "Git repository commands"),
-            ]
-            if self.settings.enable_project_threads:
-                commands.append(BotCommand("sync_threads", "Sync project topics"))
-            return commands
-
-    # --- Agentic handlers ---
+    # --- Slash command handlers ---
 
     async def agentic_start(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, ack: Callable, command: dict, client: Any
     ) -> None:
         """Brief welcome, no buttons."""
-        user = update.effective_user
-        sync_line = ""
-        if (
-            self.settings.enable_project_threads
-            and self.settings.project_threads_mode == "private"
-        ):
-            if (
-                not update.effective_chat
-                or getattr(update.effective_chat, "type", "") != "private"
-            ):
-                await update.message.reply_text(
-                    "🚫 <b>Private Topics Mode</b>\n\n"
-                    "Use this bot in a private chat and run <code>/start</code> there.",
-                    parse_mode="HTML",
-                )
-                return
-            manager = context.bot_data.get("project_threads_manager")
-            if manager:
-                try:
-                    result = await manager.sync_topics(
-                        context.bot,
-                        chat_id=update.effective_chat.id,
-                    )
-                    sync_line = (
-                        "\n\n🧵 Topics synced"
-                        f" (created {result.created}, reused {result.reused})."
-                    )
-                except PrivateTopicsUnavailableError:
-                    await update.message.reply_text(
-                        manager.private_topics_unavailable_message(),
-                        parse_mode="HTML",
-                    )
-                    return
-                except Exception:
-                    sync_line = "\n\n🧵 Topic sync failed. Run /sync_threads to retry."
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        dir_display = f"<code>{current_dir}/</code>"
+        await ack()
 
-        safe_name = escape_html(user.first_name)
-        await update.message.reply_text(
-            f"Hi {safe_name}! I'm your AI coding assistant.\n"
-            f"Just tell me what you need — I can read, write, and run code.\n\n"
-            f"Working in: {dir_display}\n"
-            f"Commands: /new (reset) · /status"
-            f"{sync_line}",
-            parse_mode="HTML",
+        user_id = command["user_id"]
+        channel_id = command["channel_id"]
+        state = self._get_user_state(user_id)
+
+        current_dir = state["current_directory"]
+        dir_display = f"`{current_dir}/`"
+
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=(
+                f"Hi <@{user_id}>! I'm your AI coding assistant.\n"
+                f"Just tell me what you need — I can read, write, and run code.\n\n"
+                f"Working in: {dir_display}\n"
+                f"Commands: /claude-new (reset) · /claude-status"
+            ),
         )
 
     async def agentic_new(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, ack: Callable, command: dict, client: Any
     ) -> None:
         """Reset session, one-line confirmation."""
-        context.user_data["claude_session_id"] = None
-        context.user_data["session_started"] = True
-        context.user_data["force_new_session"] = True
+        await ack()
 
-        await update.message.reply_text("Session reset. What's next?")
+        user_id = command["user_id"]
+        channel_id = command["channel_id"]
+        state = self._get_user_state(user_id)
+
+        state["claude_session_id"] = None
+        state["force_new_session"] = True
+
+        await client.chat_postMessage(
+            channel=channel_id,
+            text="Session reset. What's next?",
+        )
 
     async def agentic_status(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, ack: Callable, command: dict, client: Any
     ) -> None:
-        """Compact one-line status, no buttons."""
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        dir_display = str(current_dir)
+        """Compact one-line status."""
+        await ack()
 
-        session_id = context.user_data.get("claude_session_id")
+        user_id = command["user_id"]
+        channel_id = command["channel_id"]
+        state = self._get_user_state(user_id)
+
+        current_dir = str(state["current_directory"])
+        session_id = state.get("claude_session_id")
         session_status = "active" if session_id else "none"
 
         # Cost info
         cost_str = ""
-        rate_limiter = context.bot_data.get("rate_limiter")
+        rate_limiter = self.deps.get("rate_limiter")
         if rate_limiter:
             try:
-                user_status = rate_limiter.get_user_status(update.effective_user.id)
+                user_status = rate_limiter.get_user_status(user_id)
                 cost_usage = user_status.get("cost_usage", {})
                 current_cost = cost_usage.get("current", 0.0)
                 cost_str = f" · Cost: ${current_cost:.2f}"
             except Exception:
                 pass
 
-        await update.message.reply_text(
-            f"📂 {dir_display} · Session: {session_status}{cost_str}"
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f"{current_dir} · Session: {session_status}{cost_str}",
         )
 
-    def _get_verbose_level(self, context: ContextTypes.DEFAULT_TYPE) -> int:
+    def _get_verbose_level(self, user_id: str) -> int:
         """Return effective verbose level: per-user override or global default."""
-        user_override = context.user_data.get("verbose_level")
+        state = self._get_user_state(user_id)
+        user_override = state.get("verbose_level")
         if user_override is not None:
             return int(user_override)
         return self.settings.verbose_level
 
     async def agentic_verbose(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+        self, ack: Callable, command: dict, client: Any
     ) -> None:
         """Set output verbosity: /verbose [0|1|2]."""
-        args = update.message.text.split()[1:] if update.message.text else []
-        if not args:
-            current = self._get_verbose_level(context)
+        await ack()
+
+        user_id = command["user_id"]
+        channel_id = command["channel_id"]
+        args_text = command.get("text", "").strip()
+
+        if not args_text:
+            current = self._get_verbose_level(user_id)
             labels = {0: "quiet", 1: "normal", 2: "detailed"}
-            await update.message.reply_text(
-                f"Verbosity: <b>{current}</b> ({labels.get(current, '?')})\n\n"
-                "Usage: <code>/verbose 0|1|2</code>\n"
-                "  0 = quiet (final response only)\n"
-                "  1 = normal (tools + reasoning)\n"
-                "  2 = detailed (tools with inputs + reasoning)",
-                parse_mode="HTML",
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    f"Verbosity: *{current}* ({labels.get(current, '?')})\n\n"
+                    "Usage: `/verbose 0|1|2`\n"
+                    "  0 = quiet (final response only)\n"
+                    "  1 = normal (tools + reasoning)\n"
+                    "  2 = detailed (tools with inputs + reasoning)"
+                ),
             )
             return
 
         try:
-            level = int(args[0])
+            level = int(args_text.split()[0])
             if level not in (0, 1, 2):
                 raise ValueError
         except ValueError:
-            await update.message.reply_text(
-                "Please use: /verbose 0, /verbose 1, or /verbose 2"
+            await client.chat_postMessage(
+                channel=channel_id,
+                text="Please use: /verbose 0, /verbose 1, or /verbose 2",
             )
             return
 
-        context.user_data["verbose_level"] = level
+        state = self._get_user_state(user_id)
+        state["verbose_level"] = level
         labels = {0: "quiet", 1: "normal", 2: "detailed"}
-        await update.message.reply_text(
-            f"Verbosity set to <b>{level}</b> ({labels[level]})",
-            parse_mode="HTML",
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f"Verbosity set to *{level}* ({labels[level]})",
         )
+
+    async def agentic_repo(
+        self, ack: Callable, command: dict, client: Any
+    ) -> None:
+        """List repos in workspace or switch to one.
+
+        /repo          — list subdirectories with git indicators
+        /repo <name>   — switch to that directory, resume session if available
+        """
+        await ack()
+
+        user_id = command["user_id"]
+        channel_id = command["channel_id"]
+        args_text = command.get("text", "").strip()
+        state = self._get_user_state(user_id)
+        base = self.settings.approved_directory
+        current_dir = state["current_directory"]
+
+        if args_text:
+            target_name = args_text.split()[0]
+            target_path = base / target_name
+            if not target_path.is_dir():
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"Directory not found: `{_escape_mrkdwn(target_name)}`",
+                )
+                return
+
+            state["current_directory"] = target_path
+
+            # Try to find a resumable session
+            claude_integration = self.deps.get("claude_integration")
+            session_id = None
+            if claude_integration:
+                existing = await claude_integration._find_resumable_session(
+                    user_id, target_path
+                )
+                if existing:
+                    session_id = existing.session_id
+            state["claude_session_id"] = session_id
+
+            is_git = (target_path / ".git").is_dir()
+            git_badge = " (git)" if is_git else ""
+            session_badge = " · session resumed" if session_id else ""
+
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f"Switched to `{_escape_mrkdwn(target_name)}/`{git_badge}{session_badge}",
+            )
+            return
+
+        # No args — list repos
+        try:
+            entries = sorted(
+                [
+                    d
+                    for d in base.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")
+                ],
+                key=lambda d: d.name,
+            )
+        except OSError as e:
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f"Error reading workspace: {e}",
+            )
+            return
+
+        if not entries:
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    f"No repos in `{_escape_mrkdwn(str(base))}`.\n"
+                    'Clone one by telling me, e.g. "clone org/repo".'
+                ),
+            )
+            return
+
+        lines: List[str] = []
+        current_name = current_dir.name if current_dir != base else None
+
+        for d in entries:
+            is_git = (d / ".git").is_dir()
+            icon = "\U0001f4e6" if is_git else "\U0001f4c1"
+            marker = " \u25c0" if d.name == current_name else ""
+            lines.append(f"{icon} `{_escape_mrkdwn(d.name)}/`{marker}")
+
+        # Build Block Kit action buttons for repo selection (2 per row)
+        actions_blocks: List[dict] = []
+        button_elements: List[dict] = []
+        for d in entries:
+            button_elements.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": d.name},
+                    "action_id": f"cd:{d.name}",
+                    "value": d.name,
+                }
+            )
+            if len(button_elements) >= 5:  # Slack max 5 elements per actions block
+                actions_blocks.append(
+                    {"type": "actions", "elements": button_elements}
+                )
+                button_elements = []
+        if button_elements:
+            actions_blocks.append(
+                {"type": "actions", "elements": button_elements}
+            )
+
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Repos*\n\n" + "\n".join(lines),
+                },
+            },
+            *actions_blocks,
+        ]
+
+        await client.chat_postMessage(
+            channel=channel_id,
+            text="Repos",  # fallback text
+            blocks=blocks,
+        )
+
+    # --- Message event handler ---
+
+    async def handle_message_event(self, event: dict, say: Callable, client: Any) -> None:
+        """Route Slack message events to the appropriate handler."""
+        # Ignore bot messages, message_changed, etc.
+        subtype = event.get("subtype")
+        if subtype is not None:
+            return
+
+        user_id = event.get("user", "")
+        if not user_id:
+            return
+
+        text = event.get("text", "")
+        files = event.get("files")
+        channel_id = event.get("channel", "")
+        thread_ts = event.get("thread_ts") or event.get("ts")
+
+        if files:
+            await self._handle_file_upload(
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                files=files,
+                caption=text,
+                client=client,
+            )
+        elif text:
+            await self._handle_text_message(
+                user_id=user_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                text=text,
+                client=client,
+            )
+
+    # --- Verbose progress helpers ---
 
     def _format_verbose_progress(
         self,
@@ -560,18 +430,15 @@ class MessageOrchestrator:
         elapsed = time.time() - start_time
         lines: List[str] = [f"Working... ({elapsed:.0f}s)\n"]
 
-        for entry in activity_log[-15:]:  # Show last 15 entries max
+        for entry in activity_log[-15:]:
             kind = entry.get("kind", "tool")
             if kind == "text":
-                # Claude's intermediate reasoning/commentary
                 snippet = entry.get("detail", "")
                 if verbose_level >= 2:
                     lines.append(f"\U0001f4ac {snippet}")
                 else:
-                    # Level 1: one short line
                     lines.append(f"\U0001f4ac {snippet[:80]}")
             else:
-                # Tool call
                 icon = _tool_icon(entry["name"])
                 if verbose_level >= 2 and entry.get("detail"):
                     lines.append(f"{icon} {entry['name']}: {entry['detail']}")
@@ -591,7 +458,6 @@ class MessageOrchestrator:
         if tool_name in ("Read", "Write", "Edit", "MultiEdit"):
             path = tool_input.get("file_path") or tool_input.get("path", "")
             if path:
-                # Show just the filename, not the full path
                 return path.rsplit("/", 1)[-1]
         if tool_name in ("Glob", "Grep"):
             pattern = tool_input.get("pattern", "")
@@ -607,72 +473,44 @@ class MessageOrchestrator:
             desc = tool_input.get("description", "")
             if desc:
                 return desc[:60]
-        # Generic: show first key's value
         for v in tool_input.values():
             if isinstance(v, str) and v:
                 return v[:60]
         return ""
 
-    @staticmethod
-    def _start_typing_heartbeat(
-        chat: Any,
-        interval: float = 2.0,
-    ) -> "asyncio.Task[None]":
-        """Start a background typing indicator task.
-
-        Sends typing every *interval* seconds, independently of
-        stream events. Cancel the returned task in a ``finally``
-        block.
-        """
-
-        async def _heartbeat() -> None:
-            try:
-                while True:
-                    await asyncio.sleep(interval)
-                    try:
-                        await chat.send_action("typing")
-                    except Exception:
-                        pass
-            except asyncio.CancelledError:
-                pass
-
-        return asyncio.create_task(_heartbeat())
-
     def _make_stream_callback(
         self,
         verbose_level: int,
-        progress_msg: Any,
+        client: Any,
+        channel_id: str,
+        progress_ts: str,
         tool_log: List[Dict[str, Any]],
         start_time: float,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
         Returns None when verbose_level is 0 (nothing to display).
-        Typing indicators are handled by a separate heartbeat task.
         """
         if verbose_level == 0:
             return None
 
-        last_edit_time = [0.0]  # mutable container for closure
+        last_edit_time = [0.0]
 
         async def _on_stream(update_obj: StreamUpdate) -> None:
-            # Capture tool calls
             if update_obj.tool_calls:
                 for tc in update_obj.tool_calls:
                     name = tc.get("name", "unknown")
                     detail = self._summarize_tool_input(name, tc.get("input", {}))
                     tool_log.append({"kind": "tool", "name": name, "detail": detail})
 
-            # Capture assistant text (reasoning / commentary)
             if update_obj.type == "assistant" and update_obj.content:
                 text = update_obj.content.strip()
                 if text and verbose_level >= 1:
-                    # Collapse to first meaningful line, cap length
                     first_line = text.split("\n", 1)[0].strip()
                     if first_line:
                         tool_log.append({"kind": "text", "detail": first_line[:120]})
 
-            # Throttle progress message edits to avoid Telegram rate limits
+            # Throttle progress message edits to avoid Slack rate limits
             now = time.time()
             if (now - last_edit_time[0]) >= 2.0 and tool_log:
                 last_edit_time[0] = now
@@ -680,69 +518,79 @@ class MessageOrchestrator:
                     tool_log, verbose_level, start_time
                 )
                 try:
-                    await progress_msg.edit_text(new_text)
+                    await client.chat_update(
+                        channel=channel_id,
+                        ts=progress_ts,
+                        text=new_text,
+                    )
                 except Exception:
                     pass
 
         return _on_stream
 
-    async def agentic_text(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    # --- Internal handlers ---
+
+    async def _handle_text_message(
+        self,
+        user_id: str,
+        channel_id: str,
+        thread_ts: str,
+        text: str,
+        client: Any,
     ) -> None:
         """Direct Claude passthrough. Simple progress. No suggestions."""
-        user_id = update.effective_user.id
-        message_text = update.message.text
-
         logger.info(
             "Agentic text message",
             user_id=user_id,
-            message_length=len(message_text),
+            message_length=len(text),
         )
 
+        state = self._get_user_state(user_id)
+
         # Rate limit check
-        rate_limiter = context.bot_data.get("rate_limiter")
+        rate_limiter = self.deps.get("rate_limiter")
         if rate_limiter:
             allowed, limit_message = await rate_limiter.check_rate_limit(user_id, 0.001)
             if not allowed:
-                await update.message.reply_text(f"⏱️ {limit_message}")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=f"Rate limit: {limit_message}",
+                )
                 return
 
-        chat = update.message.chat
-        await chat.send_action("typing")
+        # Post "Working..." progress message
+        progress_result = await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Working...",
+        )
+        progress_ts = progress_result["ts"]
 
-        verbose_level = self._get_verbose_level(context)
-        progress_msg = await update.message.reply_text("Working...")
-
-        claude_integration = context.bot_data.get("claude_integration")
+        claude_integration = self.deps.get("claude_integration")
         if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text="Claude integration not available. Check configuration.",
             )
             return
 
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        session_id = context.user_data.get("claude_session_id")
+        current_dir = state["current_directory"]
+        session_id = state.get("claude_session_id")
+        force_new = bool(state.get("force_new_session"))
 
-        # Check if /new was used — skip auto-resume for this first message.
-        # Flag is only cleared after a successful run so retries keep the intent.
-        force_new = bool(context.user_data.get("force_new_session"))
-
-        # --- Verbose progress tracking via stream callback ---
+        verbose_level = self._get_verbose_level(user_id)
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
         on_stream = self._make_stream_callback(
-            verbose_level, progress_msg, tool_log, start_time
+            verbose_level, client, channel_id, progress_ts, tool_log, start_time
         )
-
-        # Independent typing heartbeat — stays alive even with no stream events
-        heartbeat = self._start_typing_heartbeat(chat)
 
         success = True
         try:
             claude_response = await claude_integration.run_command(
-                prompt=message_text,
+                prompt=text,
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
@@ -750,192 +598,192 @@ class MessageOrchestrator:
                 force_new=force_new,
             )
 
-            # New session created successfully — clear the one-shot flag
             if force_new:
-                context.user_data["force_new_session"] = False
+                state["force_new_session"] = False
 
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            # Track directory changes
-            from .handlers.message import _update_working_directory_from_claude_response
-
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
+            state["claude_session_id"] = claude_response.session_id
 
             # Store interaction
-            storage = context.bot_data.get("storage")
+            storage = self.deps.get("storage")
             if storage:
                 try:
                     await storage.save_claude_interaction(
                         user_id=user_id,
                         session_id=claude_response.session_id,
-                        prompt=message_text,
+                        prompt=text,
                         response=claude_response,
                         ip_address=None,
                     )
                 except Exception as e:
                     logger.warning("Failed to log interaction", error=str(e))
 
-            # Format response (no reply_markup — strip keyboards)
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
+            response_text = claude_response.content or "(no response)"
 
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
-            from .handlers.message import _format_error_message
-            from .utils.formatting import FormattedMessage
+            response_text = f"Error: {str(e)[:500]}"
 
-            formatted_messages = [
-                FormattedMessage(_format_error_message(e), parse_mode="HTML")
-            ]
-        finally:
-            heartbeat.cancel()
+        # Delete progress message and send final response
+        try:
+            await client.chat_delete(channel=channel_id, ts=progress_ts)
+        except Exception:
+            pass
 
-        await progress_msg.delete()
+        # Split long messages if needed (Slack limit ~40k chars, use 39k for safety)
+        from ..utils.constants import SAFE_MESSAGE_LENGTH
 
-        for i, message in enumerate(formatted_messages):
-            if not message.text or not message.text.strip():
-                continue
-            try:
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,  # No keyboards in agentic mode
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
+        if len(response_text) <= SAFE_MESSAGE_LENGTH:
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=response_text,
+            )
+        else:
+            # Split into chunks
+            chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
+            for i, chunk in enumerate(chunks):
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=chunk,
                 )
-                if i < len(formatted_messages) - 1:
+                if i < len(chunks) - 1:
                     await asyncio.sleep(0.5)
-            except Exception as send_err:
-                logger.warning(
-                    "Failed to send HTML response, retrying as plain text",
-                    error=str(send_err),
-                    message_index=i,
-                )
-                try:
-                    await update.message.reply_text(
-                        message.text,
-                        reply_markup=None,
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
-                except Exception as plain_err:
-                    await update.message.reply_text(
-                        f"Failed to deliver response "
-                        f"(Telegram error: {str(plain_err)[:150]}). "
-                        f"Please try again.",
-                        reply_to_message_id=(
-                            update.message.message_id if i == 0 else None
-                        ),
-                    )
 
         # Audit log
-        audit_logger = context.bot_data.get("audit_logger")
+        audit_logger = self.deps.get("audit_logger")
         if audit_logger:
             await audit_logger.log_command(
                 user_id=user_id,
                 command="text_message",
-                args=[message_text[:100]],
+                args=[text[:100]],
                 success=success,
             )
 
-    async def agentic_document(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    async def _handle_file_upload(
+        self,
+        user_id: str,
+        channel_id: str,
+        thread_ts: str,
+        files: List[dict],
+        caption: str,
+        client: Any,
     ) -> None:
-        """Process file upload -> Claude, minimal chrome."""
-        user_id = update.effective_user.id
-        document = update.message.document
-
+        """Process file upload -> Claude."""
         logger.info(
-            "Agentic document upload",
+            "Agentic file upload",
             user_id=user_id,
-            filename=document.file_name,
+            file_count=len(files),
         )
 
-        # Security validation
-        security_validator = context.bot_data.get("security_validator")
+        state = self._get_user_state(user_id)
+
+        # Security validation on first file
+        file_info = files[0]
+        filename = file_info.get("name", "unknown")
+        file_size = file_info.get("size", 0)
+
+        security_validator = self.deps.get("security_validator")
         if security_validator:
-            valid, error = security_validator.validate_filename(document.file_name)
+            valid, error = security_validator.validate_filename(filename)
             if not valid:
-                await update.message.reply_text(f"File rejected: {error}")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=f"File rejected: {error}",
+                )
                 return
 
-        # Size check
         max_size = 10 * 1024 * 1024
-        if document.file_size > max_size:
-            await update.message.reply_text(
-                f"File too large ({document.file_size / 1024 / 1024:.1f}MB). Max: 10MB."
+        if file_size > max_size:
+            await client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=thread_ts,
+                text=f"File too large ({file_size / 1024 / 1024:.1f}MB). Max: 10MB.",
             )
             return
 
-        chat = update.message.chat
-        await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
+        progress_result = await client.chat_postMessage(
+            channel=channel_id,
+            thread_ts=thread_ts,
+            text="Working...",
+        )
+        progress_ts = progress_result["ts"]
 
-        # Try enhanced file handler, fall back to basic
-        features = context.bot_data.get("features")
-        file_handler = features.get_file_handler() if features else None
-        prompt: Optional[str] = None
-
-        if file_handler:
-            try:
-                processed_file = await file_handler.handle_document_upload(
-                    document,
-                    user_id,
-                    update.message.caption or "Please review this file:",
+        # Download file content
+        try:
+            url_private = file_info.get("url_private")
+            if not url_private:
+                await client.chat_update(
+                    channel=channel_id,
+                    ts=progress_ts,
+                    text="Could not access file URL.",
                 )
-                prompt = processed_file.prompt
-            except Exception:
-                file_handler = None
+                return
 
-        if not file_handler:
-            file = await document.get_file()
-            file_bytes = await file.download_as_bytearray()
+            import aiohttp
+
+            headers = {
+                "Authorization": f"Bearer {self.settings.slack_bot_token_str}"
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url_private, headers=headers) as resp:
+                    if resp.status != 200:
+                        await client.chat_update(
+                            channel=channel_id,
+                            ts=progress_ts,
+                            text=f"Failed to download file (HTTP {resp.status}).",
+                        )
+                        return
+                    file_bytes = await resp.read()
+
             try:
                 content = file_bytes.decode("utf-8")
                 if len(content) > 50000:
                     content = content[:50000] + "\n... (truncated)"
-                caption = update.message.caption or "Please review this file:"
+                file_caption = caption or "Please review this file:"
                 prompt = (
-                    f"{caption}\n\n**File:** `{document.file_name}`\n\n"
+                    f"{file_caption}\n\n**File:** `{filename}`\n\n"
                     f"```\n{content}\n```"
                 )
             except UnicodeDecodeError:
-                await progress_msg.edit_text(
-                    "Unsupported file format. Must be text-based (UTF-8)."
+                await client.chat_update(
+                    channel=channel_id,
+                    ts=progress_ts,
+                    text="Unsupported file format. Must be text-based (UTF-8).",
                 )
                 return
 
-        # Process with Claude
-        claude_integration = context.bot_data.get("claude_integration")
-        if not claude_integration:
-            await progress_msg.edit_text(
-                "Claude integration not available. Check configuration."
+        except Exception as e:
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text=f"Failed to process file: {str(e)[:200]}",
             )
             return
 
-        current_dir = context.user_data.get(
-            "current_directory", self.settings.approved_directory
-        )
-        session_id = context.user_data.get("claude_session_id")
+        # Process with Claude
+        claude_integration = self.deps.get("claude_integration")
+        if not claude_integration:
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text="Claude integration not available. Check configuration.",
+            )
+            return
 
-        # Check if /new was used — skip auto-resume for this first message.
-        # Flag is only cleared after a successful run so retries keep the intent.
-        force_new = bool(context.user_data.get("force_new_session"))
+        current_dir = state["current_directory"]
+        session_id = state.get("claude_session_id")
+        force_new = bool(state.get("force_new_session"))
 
-        verbose_level = self._get_verbose_level(context)
+        verbose_level = self._get_verbose_level(user_id)
         tool_log: List[Dict[str, Any]] = []
+        start_time = time.time()
         on_stream = self._make_stream_callback(
-            verbose_level, progress_msg, tool_log, time.time()
+            verbose_level, client, channel_id, progress_ts, tool_log, start_time
         )
 
-        heartbeat = self._start_typing_heartbeat(chat)
         try:
             claude_response = await claude_integration.run_command(
                 prompt=prompt,
@@ -947,278 +795,127 @@ class MessageOrchestrator:
             )
 
             if force_new:
-                context.user_data["force_new_session"] = False
+                state["force_new_session"] = False
 
-            context.user_data["claude_session_id"] = claude_response.session_id
+            state["claude_session_id"] = claude_response.session_id
 
-            from .handlers.message import _update_working_directory_from_claude_response
+            response_text = claude_response.content or "(no response)"
 
-            _update_working_directory_from_claude_response(
-                claude_response, context, self.settings, user_id
-            )
-
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
-            await progress_msg.delete()
-
-            for i, message in enumerate(formatted_messages):
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
-
-        except Exception as e:
-            from .handlers.message import _format_error_message
-
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
-            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
-        finally:
-            heartbeat.cancel()
-
-    async def agentic_photo(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Process photo -> Claude, minimal chrome."""
-        user_id = update.effective_user.id
-
-        features = context.bot_data.get("features")
-        image_handler = features.get_image_handler() if features else None
-
-        if not image_handler:
-            await update.message.reply_text("Photo processing is not available.")
-            return
-
-        chat = update.message.chat
-        await chat.send_action("typing")
-        progress_msg = await update.message.reply_text("Working...")
-
-        try:
-            photo = update.message.photo[-1]
-            processed_image = await image_handler.process_image(
-                photo, update.message.caption
-            )
-
-            claude_integration = context.bot_data.get("claude_integration")
-            if not claude_integration:
-                await progress_msg.edit_text(
-                    "Claude integration not available. Check configuration."
-                )
-                return
-
-            current_dir = context.user_data.get(
-                "current_directory", self.settings.approved_directory
-            )
-            session_id = context.user_data.get("claude_session_id")
-
-            # Check if /new was used — skip auto-resume for this first message.
-            # Flag is only cleared after a successful run so retries keep the intent.
-            force_new = bool(context.user_data.get("force_new_session"))
-
-            verbose_level = self._get_verbose_level(context)
-            tool_log: List[Dict[str, Any]] = []
-            on_stream = self._make_stream_callback(
-                verbose_level, progress_msg, tool_log, time.time()
-            )
-
-            heartbeat = self._start_typing_heartbeat(chat)
             try:
-                claude_response = await claude_integration.run_command(
-                    prompt=processed_image.prompt,
-                    working_directory=current_dir,
-                    user_id=user_id,
-                    session_id=session_id,
-                    on_stream=on_stream,
-                    force_new=force_new,
+                await client.chat_delete(channel=channel_id, ts=progress_ts)
+            except Exception:
+                pass
+
+            from ..utils.constants import SAFE_MESSAGE_LENGTH
+
+            if len(response_text) <= SAFE_MESSAGE_LENGTH:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text=response_text,
                 )
-            finally:
-                heartbeat.cancel()
-
-            if force_new:
-                context.user_data["force_new_session"] = False
-
-            context.user_data["claude_session_id"] = claude_response.session_id
-
-            from .utils.formatting import ResponseFormatter
-
-            formatter = ResponseFormatter(self.settings)
-            formatted_messages = formatter.format_claude_response(
-                claude_response.content
-            )
-
-            await progress_msg.delete()
-
-            for i, message in enumerate(formatted_messages):
-                await update.message.reply_text(
-                    message.text,
-                    parse_mode=message.parse_mode,
-                    reply_markup=None,
-                    reply_to_message_id=(update.message.message_id if i == 0 else None),
-                )
-                if i < len(formatted_messages) - 1:
-                    await asyncio.sleep(0.5)
+            else:
+                chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
+                for i, chunk in enumerate(chunks):
+                    await client.chat_postMessage(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text=chunk,
+                    )
+                    if i < len(chunks) - 1:
+                        await asyncio.sleep(0.5)
 
         except Exception as e:
-            from .handlers.message import _format_error_message
-
-            await progress_msg.edit_text(_format_error_message(e), parse_mode="HTML")
-            logger.error(
-                "Claude photo processing failed", error=str(e), user_id=user_id
+            await client.chat_update(
+                channel=channel_id,
+                ts=progress_ts,
+                text=f"Error: {str(e)[:500]}",
             )
+            logger.error("Claude file processing failed", error=str(e), user_id=user_id)
 
-    async def agentic_repo(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """List repos in workspace or switch to one.
+    # --- Block Kit action handler ---
 
-        /repo          — list subdirectories with git indicators
-        /repo <name>   — switch to that directory, resume session if available
-        """
-        args = update.message.text.split()[1:] if update.message.text else []
-        base = self.settings.approved_directory
-        current_dir = context.user_data.get("current_directory", base)
+    async def handle_repo_action(self, ack: Callable, body: dict, client: Any) -> None:
+        """Handle cd: button clicks — switch directory and resume session."""
+        await ack()
 
-        if args:
-            # Switch to named repo
-            target_name = args[0]
-            target_path = base / target_name
-            if not target_path.is_dir():
-                await update.message.reply_text(
-                    f"Directory not found: <code>{escape_html(target_name)}</code>",
-                    parse_mode="HTML",
-                )
-                return
+        action = body["actions"][0]
+        project_name = action["value"]
+        user_id = body["user"]["id"]
+        channel_id = body["channel"]["id"]
 
-            context.user_data["current_directory"] = target_path
-
-            # Try to find a resumable session
-            claude_integration = context.bot_data.get("claude_integration")
-            session_id = None
-            if claude_integration:
-                existing = await claude_integration._find_resumable_session(
-                    update.effective_user.id, target_path
-                )
-                if existing:
-                    session_id = existing.session_id
-            context.user_data["claude_session_id"] = session_id
-
-            is_git = (target_path / ".git").is_dir()
-            git_badge = " (git)" if is_git else ""
-            session_badge = " · session resumed" if session_id else ""
-
-            await update.message.reply_text(
-                f"Switched to <code>{escape_html(target_name)}/</code>"
-                f"{git_badge}{session_badge}",
-                parse_mode="HTML",
-            )
-            return
-
-        # No args — list repos
-        try:
-            entries = sorted(
-                [
-                    d
-                    for d in base.iterdir()
-                    if d.is_dir() and not d.name.startswith(".")
-                ],
-                key=lambda d: d.name,
-            )
-        except OSError as e:
-            await update.message.reply_text(f"Error reading workspace: {e}")
-            return
-
-        if not entries:
-            await update.message.reply_text(
-                f"No repos in <code>{escape_html(str(base))}</code>.\n"
-                'Clone one by telling me, e.g. <i>"clone org/repo"</i>.',
-                parse_mode="HTML",
-            )
-            return
-
-        lines: List[str] = []
-        keyboard_rows: List[list] = []  # type: ignore[type-arg]
-        current_name = current_dir.name if current_dir != base else None
-
-        for d in entries:
-            is_git = (d / ".git").is_dir()
-            icon = "\U0001f4e6" if is_git else "\U0001f4c1"
-            marker = " \u25c0" if d.name == current_name else ""
-            lines.append(f"{icon} <code>{escape_html(d.name)}/</code>{marker}")
-
-        # Build inline keyboard (2 per row)
-        for i in range(0, len(entries), 2):
-            row = []
-            for j in range(2):
-                if i + j < len(entries):
-                    name = entries[i + j].name
-                    row.append(InlineKeyboardButton(name, callback_data=f"cd:{name}"))
-            keyboard_rows.append(row)
-
-        reply_markup = InlineKeyboardMarkup(keyboard_rows)
-
-        await update.message.reply_text(
-            "<b>Repos</b>\n\n" + "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=reply_markup,
-        )
-
-    async def _agentic_callback(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
-        """Handle cd: callbacks — switch directory and resume session if available."""
-        query = update.callback_query
-        await query.answer()
-
-        data = query.data
-        _, project_name = data.split(":", 1)
-
+        state = self._get_user_state(user_id)
         base = self.settings.approved_directory
         new_path = base / project_name
 
         if not new_path.is_dir():
-            await query.edit_message_text(
-                f"Directory not found: <code>{escape_html(project_name)}</code>",
-                parse_mode="HTML",
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f"Directory not found: `{_escape_mrkdwn(project_name)}`",
             )
             return
 
-        context.user_data["current_directory"] = new_path
+        state["current_directory"] = new_path
 
-        # Look for a resumable session instead of always clearing
-        claude_integration = context.bot_data.get("claude_integration")
+        # Look for a resumable session
+        claude_integration = self.deps.get("claude_integration")
         session_id = None
         if claude_integration:
             existing = await claude_integration._find_resumable_session(
-                query.from_user.id, new_path
+                user_id, new_path
             )
             if existing:
                 session_id = existing.session_id
-        context.user_data["claude_session_id"] = session_id
+        state["claude_session_id"] = session_id
 
         is_git = (new_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""
         session_badge = " · session resumed" if session_id else ""
 
-        await query.edit_message_text(
-            f"Switched to <code>{escape_html(project_name)}/</code>"
-            f"{git_badge}{session_badge}",
-            parse_mode="HTML",
-        )
+        # Update the original message to show selection
+        message_ts = body.get("message", {}).get("ts")
+        if message_ts:
+            await client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}{session_badge}",
+                blocks=[],  # Remove buttons
+            )
+        else:
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}{session_badge}",
+            )
 
         # Audit log
-        audit_logger = context.bot_data.get("audit_logger")
+        audit_logger = self.deps.get("audit_logger")
         if audit_logger:
             await audit_logger.log_command(
-                user_id=query.from_user.id,
+                user_id=user_id,
                 command="cd",
                 args=[project_name],
                 success=True,
             )
+
+    @staticmethod
+    def _split_message(text: str, max_length: int) -> List[str]:
+        """Split a long message into chunks, trying to break at newlines."""
+        if len(text) <= max_length:
+            return [text]
+
+        chunks: List[str] = []
+        while text:
+            if len(text) <= max_length:
+                chunks.append(text)
+                break
+
+            # Try to find a newline to break at
+            split_pos = text.rfind("\n", 0, max_length)
+            if split_pos < max_length // 2:
+                # No good newline break, split at max_length
+                split_pos = max_length
+
+            chunks.append(text[:split_pos])
+            text = text[split_pos:].lstrip("\n")
+
+        return chunks

@@ -84,7 +84,7 @@ class TestDatabaseManager:
                 "idx_audit_log_user_id",
                 "idx_audit_log_timestamp",
                 "idx_cost_tracking_user_date",
-                "idx_project_threads_chat_active",
+                "idx_project_threads_channel_active",
                 "idx_project_threads_slug",
             ]
 

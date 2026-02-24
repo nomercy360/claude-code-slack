@@ -89,18 +89,25 @@ def _mock_client_factory(*messages, capture_options=None):
     return factory
 
 
+def _make_settings(tmp_path, **kwargs):
+    """Create Settings with Slack tokens for tests."""
+    defaults = {
+        "slack_bot_token": "xoxb-test-token",
+        "slack_app_token": "xapp-test-token",
+        "approved_directory": tmp_path,
+        "claude_timeout_seconds": 2,
+    }
+    defaults.update(kwargs)
+    return Settings(**defaults)
+
+
 class TestClaudeSDKManager:
     """Test Claude SDK manager."""
 
     @pytest.fixture
     def config(self, tmp_path):
         """Create test config without API key."""
-        return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,  # Short timeout for testing
-        )
+        return _make_settings(tmp_path)
 
     @pytest.fixture
     def sdk_manager(self, config):
@@ -109,15 +116,9 @@ class TestClaudeSDKManager:
 
     async def test_sdk_manager_initialization_with_api_key(self, tmp_path):
         """Test SDK manager initialization with API key."""
-        from src.config.settings import Settings
-
-        # Test with API key provided
-        config_with_key = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
+        config_with_key = _make_settings(
+            tmp_path,
             anthropic_api_key="test-api-key",
-            claude_timeout_seconds=2,
         )
 
         # Store original env var
@@ -274,11 +275,8 @@ class TestClaudeSDKManager:
             '{"mcpServers": {"test-server": {"command": "echo", "args": ["hello"]}}}'
         )
 
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
+        config = _make_settings(
+            tmp_path,
             enable_mcp=True,
             mcp_config_path=str(mcp_config_file),
         )
@@ -380,11 +378,8 @@ class TestClaudeSandboxSettings:
     @pytest.fixture
     def config(self, tmp_path):
         """Create test config with sandbox enabled."""
-        return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
+        return _make_settings(
+            tmp_path,
             sandbox_enabled=True,
             sandbox_excluded_commands=["git", "npm"],
         )
@@ -444,11 +439,8 @@ class TestClaudeSandboxSettings:
 
     async def test_disallowed_tools_passed_to_options(self, tmp_path):
         """Test that disallowed_tools from config are passed to ClaudeAgentOptions."""
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
+        config = _make_settings(
+            tmp_path,
             claude_disallowed_tools=["WebFetch", "WebSearch"],
         )
         manager = ClaudeSDKManager(config)
@@ -473,11 +465,8 @@ class TestClaudeSandboxSettings:
 
     async def test_allowed_tools_passed_to_options(self, tmp_path):
         """Test that allowed_tools from config are passed to ClaudeAgentOptions."""
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
+        config = _make_settings(
+            tmp_path,
             claude_allowed_tools=["Read", "Write", "Bash"],
         )
         manager = ClaudeSDKManager(config)
@@ -502,11 +491,8 @@ class TestClaudeSandboxSettings:
 
     async def test_sandbox_disabled_when_config_false(self, tmp_path):
         """Test sandbox is disabled when sandbox_enabled=False."""
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
+        config = _make_settings(
+            tmp_path,
             sandbox_enabled=False,
         )
         manager = ClaudeSDKManager(config)
@@ -536,12 +522,7 @@ class TestClaudeMCPErrors:
     @pytest.fixture
     def config(self, tmp_path):
         """Create test config."""
-        return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
-        )
+        return _make_settings(tmp_path)
 
     @pytest.fixture
     def sdk_manager(self, config):
@@ -677,12 +658,7 @@ class TestCanUseToolCallback:
         validator = MagicMock()
         validator.validate_path = MagicMock(return_value=(True, tmp_path, None))
 
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
-        )
+        config = _make_settings(tmp_path)
         manager = ClaudeSDKManager(config, security_validator=validator)
 
         captured_options = []
@@ -702,12 +678,7 @@ class TestCanUseToolCallback:
 
     async def test_no_callback_without_security_validator(self, tmp_path):
         """Verify can_use_tool is None when no SecurityValidator is provided."""
-        config = Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
-        )
+        config = _make_settings(tmp_path)
         manager = ClaudeSDKManager(config)
 
         captured_options = []
@@ -731,12 +702,7 @@ class TestSessionIdFallback:
 
     @pytest.fixture
     def config(self, tmp_path):
-        return Settings(
-            telegram_bot_token="test:token",
-            telegram_bot_username="testbot",
-            approved_directory=tmp_path,
-            claude_timeout_seconds=2,
-        )
+        return _make_settings(tmp_path)
 
     @pytest.fixture
     def sdk_manager(self, config):

@@ -48,8 +48,8 @@ class FeatureFlags:
 
     @property
     def webhook_enabled(self) -> bool:
-        """Check if webhook mode is enabled."""
-        return self.settings.webhook_url is not None
+        """Check if webhook/API server is enabled for receiving webhooks."""
+        return self.settings.enable_api_server
 
     @property
     def development_features_enabled(self) -> bool:

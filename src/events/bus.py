@@ -1,6 +1,6 @@
 """Central async event bus.
 
-Decouples event sources (Telegram, webhooks, cron) from handlers
+Decouples event sources (Slack, webhooks, cron) from handlers
 (agent execution, notifications). All inputs become typed events
 routed to registered handlers.
 """

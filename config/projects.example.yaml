@@ -1,7 +1,7 @@
 projects:
-  - slug: claude-code-telegram
-    name: Claude Code Telegram
-    path: claude-code-telegram-main
+  - slug: claude-code-slack
+    name: Claude Code Slack
+    path: claude-code-slack-main
     enabled: true
 
   - slug: infra

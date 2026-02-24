@@ -24,7 +24,7 @@ class SQLiteSessionStorage(SessionStorage):
         self.db_manager = db_manager
 
     async def _ensure_user_exists(
-        self, user_id: int, username: Optional[str] = None
+        self, user_id: str, username: Optional[str] = None
     ) -> None:
         """Ensure user exists in database before creating session."""
         async with self.db_manager.get_connection() as conn:
@@ -40,7 +40,7 @@ class SQLiteSessionStorage(SessionStorage):
                 await conn.execute(
                     """
                     INSERT INTO users
-                    (user_id, telegram_username, first_seen, last_active, is_allowed)
+                    (user_id, slack_username, first_seen, last_active, is_allowed)
                     VALUES (?, ?, ?, ?, ?)
                     """,
                     (
@@ -122,7 +122,7 @@ class SQLiteSessionStorage(SessionStorage):
         )
 
     async def load_session(
-        self, session_id: str, user_id: int
+        self, session_id: str, user_id: str
     ) -> Optional[ClaudeSession]:
         """Load session from database, filtered by user ownership."""
         async with self.db_manager.get_connection() as conn:
@@ -169,7 +169,7 @@ class SQLiteSessionStorage(SessionStorage):
 
         logger.debug("Session marked as inactive", session_id=session_id)
 
-    async def get_user_sessions(self, user_id: int) -> List[ClaudeSession]:
+    async def get_user_sessions(self, user_id: str) -> List[ClaudeSession]:
         """Get all active sessions for a user."""
         async with self.db_manager.get_connection() as conn:
             cursor = await conn.execute(

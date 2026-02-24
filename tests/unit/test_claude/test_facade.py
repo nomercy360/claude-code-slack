@@ -38,8 +38,8 @@ def _make_user_data(force_new: bool = False) -> Dict[str, Any]:
 def config(tmp_path):
     """Create test config."""
     return Settings(
-        telegram_bot_token="test:token",
-        telegram_bot_username="testbot",
+        slack_bot_token="xoxb-test-token",
+        slack_app_token="xapp-test-token",
         approved_directory=tmp_path,
         session_timeout_hours=24,
         max_sessions_per_user=5,
@@ -72,7 +72,7 @@ class TestForceNewSkipsAutoResume:
     async def test_auto_resume_finds_existing_session(self, facade, session_manager):
         """Without force_new, run_command auto-resumes an existing session."""
         project = Path("/test/project")
-        user_id = 123
+        user_id = "U123"
 
         # Seed an existing non-temp session in storage
         existing = ClaudeSession(
@@ -93,7 +93,7 @@ class TestForceNewSkipsAutoResume:
     async def test_force_new_skips_auto_resume(self, facade, session_manager):
         """With force_new=True, run_command does NOT auto-resume."""
         project = Path("/test/project")
-        user_id = 123
+        user_id = "U123"
 
         # Seed an existing non-temp session
         existing = ClaudeSession(
@@ -134,7 +134,7 @@ class TestForceNewSurvivesFailure:
     async def _seed_session(
         self,
         session_manager: SessionManager,
-        user_id: int = 123,
+        user_id: str = "U123",
         project: Path = Path("/test/project"),
     ) -> ClaudeSession:
         existing = ClaudeSession(
@@ -152,7 +152,7 @@ class TestForceNewSurvivesFailure:
         """If run_command raises, the caller should still see
         force_new_session=True so the retry skips auto-resume."""
         project = Path("/test/project")
-        user_id = 123
+        user_id = "U123"
         await self._seed_session(session_manager, user_id, project)
 
         user_data = _make_user_data(force_new=True)
@@ -183,7 +183,7 @@ class TestForceNewSurvivesFailure:
         """After a successful run_command, the handler clears
         force_new_session so subsequent messages auto-resume normally."""
         project = Path("/test/project")
-        user_id = 123
+        user_id = "U123"
         await self._seed_session(session_manager, user_id, project)
 
         user_data = _make_user_data(force_new=True)
@@ -214,7 +214,7 @@ class TestForceNewSurvivesFailure:
         """Full scenario: /new -> fail -> retry -> success.
         Both calls should skip auto-resume; flag cleared only after success."""
         project = Path("/test/project")
-        user_id = 123
+        user_id = "U123"
         await self._seed_session(session_manager, user_id, project)
 
         user_data = _make_user_data(force_new=True)
@@ -273,7 +273,7 @@ class TestEmptySessionIdWarning:
     async def test_empty_session_id_warning_in_facade(self, facade, session_manager):
         """When Claude returns no session_id, facade logs a warning."""
         project = Path("/test/project")
-        user_id = 456
+        user_id = "U456"
 
         # Return a response with empty session_id
         mock_response = _make_mock_response(session_id="")

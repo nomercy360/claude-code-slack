@@ -15,18 +15,18 @@ def event_bus() -> EventBus:
 
 
 @pytest.fixture
-def mock_bot() -> AsyncMock:
-    bot = AsyncMock()
-    bot.send_message = AsyncMock()
-    return bot
+def mock_client() -> AsyncMock:
+    client = AsyncMock()
+    client.chat_postMessage = AsyncMock()
+    return client
 
 
 @pytest.fixture
-def service(event_bus: EventBus, mock_bot: AsyncMock) -> NotificationService:
+def service(event_bus: EventBus, mock_client: AsyncMock) -> NotificationService:
     svc = NotificationService(
         event_bus=event_bus,
-        bot=mock_bot,
-        default_chat_ids=[100, 200],
+        client=mock_client,
+        default_channel_ids=["C100", "C200"],
     )
     svc.register()
     return svc
@@ -39,23 +39,25 @@ class TestNotificationService:
         self, service: NotificationService
     ) -> None:
         """Events are queued for delivery."""
-        event = AgentResponseEvent(chat_id=100, text="hello")
+        event = AgentResponseEvent(channel_id="C100", text="hello")
         await service.handle_response(event)
         assert service._send_queue.qsize() == 1
 
-    async def test_resolve_chat_ids_specific(
+    async def test_resolve_channel_ids_specific(
         self, service: NotificationService
     ) -> None:
-        """Specific chat_id takes precedence over defaults."""
-        event = AgentResponseEvent(chat_id=999, text="test")
-        ids = service._resolve_chat_ids(event)
-        assert ids == [999]
+        """Specific channel_id takes precedence over defaults."""
+        event = AgentResponseEvent(channel_id="C999", text="test")
+        ids = service._resolve_channel_ids(event)
+        assert ids == ["C999"]
 
-    async def test_resolve_chat_ids_default(self, service: NotificationService) -> None:
-        """chat_id=0 falls back to default chat IDs."""
-        event = AgentResponseEvent(chat_id=0, text="test")
-        ids = service._resolve_chat_ids(event)
-        assert ids == [100, 200]
+    async def test_resolve_channel_ids_default(
+        self, service: NotificationService
+    ) -> None:
+        """Empty channel_id falls back to default channel IDs."""
+        event = AgentResponseEvent(channel_id="", text="test")
+        ids = service._resolve_channel_ids(event)
+        assert ids == ["C100", "C200"]
 
     def test_split_message_short(self, service: NotificationService) -> None:
         """Short messages are not split."""
@@ -80,16 +82,16 @@ class TestNotificationService:
         assert len(chunks[0]) == 4096
         assert len(chunks[1]) == 904
 
-    async def test_send_to_telegram(
-        self, service: NotificationService, mock_bot: AsyncMock
+    async def test_send_to_slack(
+        self, service: NotificationService, mock_client: AsyncMock
     ) -> None:
-        """Messages are sent via the Telegram bot."""
-        event = AgentResponseEvent(chat_id=123, text="hello world")
-        await service._rate_limited_send(123, event)
+        """Messages are sent via the Slack client."""
+        event = AgentResponseEvent(channel_id="C123", text="hello world")
+        await service._rate_limited_send("C123", event)
 
-        mock_bot.send_message.assert_called_once()
-        call_kwargs = mock_bot.send_message.call_args.kwargs
-        assert call_kwargs["chat_id"] == 123
+        mock_client.chat_postMessage.assert_called_once()
+        call_kwargs = mock_client.chat_postMessage.call_args.kwargs
+        assert call_kwargs["channel"] == "C123"
         assert call_kwargs["text"] == "hello world"
 
     async def test_ignores_non_response_events(

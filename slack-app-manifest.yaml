@@ -1,0 +1,63 @@
+display_information:
+  name: Claude Code
+  description: AI coding assistant powered by Claude Code
+  background_color: "#1a1a2e"
+
+features:
+  bot_user:
+    display_name: Claude Code
+    always_online: true
+  app_home:
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  slash_commands:
+    - command: /claude-start
+      description: Start the bot and show welcome message
+      should_escape: false
+    - command: /claude-new
+      description: Reset session and start fresh
+      should_escape: false
+    - command: /claude-status
+      description: Show current session status
+      should_escape: false
+    - command: /claude-verbose
+      description: Set output verbosity level
+      usage_hint: "[0|1|2]"
+      should_escape: false
+    - command: /claude-repo
+      description: List repos or switch workspace
+      usage_hint: "[repo-name]"
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - commands
+      - files:read
+      - files:write
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - channels:read
+      - groups:read
+      - im:read
+      - users:read
+      - reactions:read
+      - reactions:write
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false

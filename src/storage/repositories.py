@@ -33,7 +33,7 @@ class UserRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def get_user(self, user_id: int) -> Optional[UserModel]:
+    async def get_user(self, user_id: str) -> Optional[UserModel]:
         """Get user by ID."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
@@ -48,13 +48,13 @@ class UserRepository:
             await conn.execute(
                 """
                 INSERT INTO users
-                (user_id, telegram_username, first_seen,
+                (user_id, slack_username, first_seen,
                  last_active, is_allowed)
                 VALUES (?, ?, ?, ?, ?)
             """,
                 (
                     user.user_id,
-                    user.telegram_username,
+                    user.slack_username,
                     user.first_seen or datetime.now(UTC),
                     user.last_active or datetime.now(UTC),
                     user.is_allowed,
@@ -63,7 +63,7 @@ class UserRepository:
             await conn.commit()
 
             logger.info(
-                "Created user", user_id=user.user_id, username=user.telegram_username
+                "Created user", user_id=user.user_id, username=user.slack_username
             )
             return user
 
@@ -73,12 +73,12 @@ class UserRepository:
             await conn.execute(
                 """
                 UPDATE users
-                SET telegram_username = ?, last_active = ?,
+                SET slack_username = ?, last_active = ?,
                     total_cost = ?, message_count = ?, session_count = ?
                 WHERE user_id = ?
             """,
                 (
-                    user.telegram_username,
+                    user.slack_username,
                     user.last_active or datetime.now(UTC),
                     user.total_cost,
                     user.message_count,
@@ -88,7 +88,7 @@ class UserRepository:
             )
             await conn.commit()
 
-    async def get_allowed_users(self) -> List[int]:
+    async def get_allowed_users(self) -> List[str]:
         """Get list of allowed user IDs."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
@@ -97,7 +97,7 @@ class UserRepository:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
-    async def set_user_allowed(self, user_id: int, allowed: bool):
+    async def set_user_allowed(self, user_id: str, allowed: bool):
         """Set user allowed status."""
         async with self.db.get_connection() as conn:
             await conn.execute(
@@ -179,7 +179,7 @@ class SessionRepository:
             await conn.commit()
 
     async def get_user_sessions(
-        self, user_id: int, active_only: bool = True
+        self, user_id: str, active_only: bool = True
     ) -> List[SessionModel]:
         """Get sessions for user."""
         async with self.db.get_connection() as conn:
@@ -235,32 +235,32 @@ class ProjectThreadRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def get_by_chat_thread(
-        self, chat_id: int, message_thread_id: int
+    async def get_by_channel_thread(
+        self, channel_id: str, thread_ts: str
     ) -> Optional[ProjectThreadModel]:
-        """Find active mapping by chat+thread."""
+        """Find active mapping by channel+thread."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT * FROM project_threads
-                WHERE chat_id = ? AND message_thread_id = ? AND is_active = TRUE
+                WHERE channel_id = ? AND thread_ts = ? AND is_active = TRUE
             """,
-                (chat_id, message_thread_id),
+                (channel_id, thread_ts),
             )
             row = await cursor.fetchone()
             return ProjectThreadModel.from_row(row) if row else None
 
-    async def get_by_chat_project(
-        self, chat_id: int, project_slug: str
+    async def get_by_channel_project(
+        self, channel_id: str, project_slug: str
     ) -> Optional[ProjectThreadModel]:
-        """Find mapping by chat+project slug."""
+        """Find mapping by channel+project slug."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
                 SELECT * FROM project_threads
-                WHERE chat_id = ? AND project_slug = ?
+                WHERE channel_id = ? AND project_slug = ?
             """,
-                (chat_id, project_slug),
+                (channel_id, project_slug),
             )
             row = await cursor.fetchone()
             return ProjectThreadModel.from_row(row) if row else None
@@ -268,37 +268,37 @@ class ProjectThreadRepository:
     async def upsert_mapping(
         self,
         project_slug: str,
-        chat_id: int,
-        message_thread_id: int,
+        channel_id: str,
+        thread_ts: str,
         topic_name: str,
         is_active: bool = True,
     ) -> ProjectThreadModel:
-        """Create or update mapping by unique chat+project key."""
+        """Create or update mapping by unique channel+project key."""
         async with self.db.get_connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO project_threads (
-                    project_slug, chat_id, message_thread_id, topic_name, is_active
+                    project_slug, channel_id, thread_ts, topic_name, is_active
                 ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(chat_id, project_slug) DO UPDATE SET
-                    message_thread_id = excluded.message_thread_id,
+                ON CONFLICT(channel_id, project_slug) DO UPDATE SET
+                    thread_ts = excluded.thread_ts,
                     topic_name = excluded.topic_name,
                     is_active = excluded.is_active,
                     updated_at = CURRENT_TIMESTAMP
             """,
-                (project_slug, chat_id, message_thread_id, topic_name, is_active),
+                (project_slug, channel_id, thread_ts, topic_name, is_active),
             )
             await conn.commit()
 
-        mapping = await self.get_by_chat_project(
-            chat_id=chat_id, project_slug=project_slug
+        mapping = await self.get_by_channel_project(
+            channel_id=channel_id, project_slug=project_slug
         )
         if not mapping:
             raise RuntimeError("Failed to upsert project thread mapping")
         return mapping
 
     async def deactivate_missing_projects(
-        self, chat_id: int, active_project_slugs: List[str]
+        self, channel_id: str, active_project_slugs: List[str]
     ) -> int:
         """Deactivate mappings for projects no longer enabled/present."""
         async with self.db.get_connection() as conn:
@@ -307,26 +307,26 @@ class ProjectThreadRepository:
                 query = f"""
                     UPDATE project_threads
                     SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = ?
+                    WHERE channel_id = ?
                       AND project_slug NOT IN ({placeholders})
                       AND is_active = TRUE
                 """
-                params = [chat_id] + active_project_slugs
+                params: list = [channel_id] + active_project_slugs
                 cursor = await conn.execute(query, params)
             else:
                 cursor = await conn.execute(
                     """
                     UPDATE project_threads
                     SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP
-                    WHERE chat_id = ? AND is_active = TRUE
+                    WHERE channel_id = ? AND is_active = TRUE
                 """,
-                    (chat_id,),
+                    (channel_id,),
                 )
             await conn.commit()
             return cursor.rowcount
 
     async def list_stale_active_mappings(
-        self, chat_id: int, active_project_slugs: List[str]
+        self, channel_id: str, active_project_slugs: List[str]
     ) -> List[ProjectThreadModel]:
         """List active mappings that are no longer enabled/present."""
         async with self.db.get_connection() as conn:
@@ -334,46 +334,48 @@ class ProjectThreadRepository:
                 placeholders = ",".join("?" for _ in active_project_slugs)
                 query = f"""
                     SELECT * FROM project_threads
-                    WHERE chat_id = ?
+                    WHERE channel_id = ?
                       AND is_active = TRUE
                       AND project_slug NOT IN ({placeholders})
                     ORDER BY project_slug ASC
                 """
-                params = [chat_id] + active_project_slugs
+                params: list = [channel_id] + active_project_slugs
                 cursor = await conn.execute(query, params)
             else:
                 cursor = await conn.execute(
                     """
                     SELECT * FROM project_threads
-                    WHERE chat_id = ? AND is_active = TRUE
+                    WHERE channel_id = ? AND is_active = TRUE
                     ORDER BY project_slug ASC
                 """,
-                    (chat_id,),
+                    (channel_id,),
                 )
             rows = await cursor.fetchall()
             return [ProjectThreadModel.from_row(row) for row in rows]
 
-    async def set_active(self, chat_id: int, project_slug: str, is_active: bool) -> int:
-        """Set active flag for a mapping by chat+project."""
+    async def set_active(
+        self, channel_id: str, project_slug: str, is_active: bool
+    ) -> int:
+        """Set active flag for a mapping by channel+project."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
                 """
                 UPDATE project_threads
                 SET is_active = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE chat_id = ? AND project_slug = ?
+                WHERE channel_id = ? AND project_slug = ?
             """,
-                (is_active, chat_id, project_slug),
+                (is_active, channel_id, project_slug),
             )
             await conn.commit()
             return cursor.rowcount
 
-    async def list_by_chat(
-        self, chat_id: int, active_only: bool = True
+    async def list_by_channel(
+        self, channel_id: str, active_only: bool = True
     ) -> List[ProjectThreadModel]:
-        """List mappings for a chat."""
+        """List mappings for a channel."""
         async with self.db.get_connection() as conn:
-            query = "SELECT * FROM project_threads WHERE chat_id = ?"
-            params = [chat_id]
+            query = "SELECT * FROM project_threads WHERE channel_id = ?"
+            params: list = [channel_id]
             if active_only:
                 query += " AND is_active = TRUE"
             query += " ORDER BY project_slug ASC"
@@ -431,7 +433,7 @@ class MessageRepository:
             return [MessageModel.from_row(row) for row in rows]
 
     async def get_user_messages(
-        self, user_id: int, limit: int = 100
+        self, user_id: str, limit: int = 100
     ) -> List[MessageModel]:
         """Get messages for user."""
         async with self.db.get_connection() as conn:
@@ -510,7 +512,7 @@ class ToolUsageRepository:
             rows = await cursor.fetchall()
             return [ToolUsageModel.from_row(row) for row in rows]
 
-    async def get_user_tool_usage(self, user_id: int) -> List[ToolUsageModel]:
+    async def get_user_tool_usage(self, user_id: str) -> List[ToolUsageModel]:
         """Get tool usage for user."""
         async with self.db.get_connection() as conn:
             cursor = await conn.execute(
@@ -578,7 +580,7 @@ class AuditLogRepository:
             return cursor.lastrowid
 
     async def get_user_audit_log(
-        self, user_id: int, limit: int = 100
+        self, user_id: str, limit: int = 100
     ) -> List[AuditLogModel]:
         """Get audit log for user."""
         async with self.db.get_connection() as conn:
@@ -616,7 +618,7 @@ class CostTrackingRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def update_daily_cost(self, user_id: int, cost: float, date: str = None):
+    async def update_daily_cost(self, user_id: str, cost: float, date: str = None):
         """Update daily cost for user."""
         if not date:
             date = datetime.now(UTC).strftime("%Y-%m-%d")
@@ -636,7 +638,7 @@ class CostTrackingRepository:
             await conn.commit()
 
     async def get_user_daily_costs(
-        self, user_id: int, days: int = 30
+        self, user_id: str, days: int = 30
     ) -> List[CostTrackingModel]:
         """Get user's daily costs."""
         async with self.db.get_connection() as conn:
@@ -679,7 +681,7 @@ class AnalyticsRepository:
         """Initialize repository."""
         self.db = db_manager
 
-    async def get_user_stats(self, user_id: int) -> Dict[str, any]:
+    async def get_user_stats(self, user_id: str) -> Dict[str, any]:
         """Get user statistics."""
         async with self.db.get_connection() as conn:
             # User summary
@@ -777,7 +779,7 @@ class AnalyticsRepository:
                 """
                 SELECT
                     u.user_id,
-                    u.telegram_username,
+                    u.slack_username,
                     SUM(m.cost) as total_cost,
                     COUNT(m.message_id) as total_messages
                 FROM messages m
