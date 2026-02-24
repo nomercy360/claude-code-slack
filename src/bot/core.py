@@ -116,9 +116,16 @@ class ClaudeCodeBot:
             # Extract user_id from the event payload
             user_id: Optional[str] = None
             if "event" in body:
-                user_id = body["event"].get("user")
+                evt = body["event"]
+                # Events with subtypes (message_changed, message_deleted, etc.)
+                # are system events — pass them through without auth checks.
+                subtype = evt.get("subtype")
+                if subtype is not None:
+                    await next()
+                    return
+                user_id = evt.get("user")
                 # bot_id present → message from a bot; skip middleware
-                if body["event"].get("bot_id"):
+                if evt.get("bot_id"):
                     logger.debug(
                         "Skipping bot-originated event in middleware",
                         middleware=middleware_func.__name__,
