@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from ...config.settings import Settings
 from ...utils.constants import SAFE_MESSAGE_LENGTH
+from .slack_format import markdown_to_slack_mrkdwn
 
 
 @dataclass
@@ -63,6 +64,8 @@ class ResponseFormatter:
 
     def _clean_text(self, text: str) -> str:
         """Clean text for Slack display."""
+        # Convert Markdown bold/strike/links/headers to Slack mrkdwn
+        text = markdown_to_slack_mrkdwn(text)
         # Remove excessive whitespace
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
