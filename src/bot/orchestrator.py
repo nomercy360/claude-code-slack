@@ -405,8 +405,9 @@ class MessageOrchestrator:
     async def handle_message_event(self, event: dict, say: Callable, client: Any) -> None:
         """Route Slack message events to the appropriate handler."""
         # Ignore bot messages, message_changed, etc.
+        # Allow file_share (file uploads come with this subtype).
         subtype = event.get("subtype")
-        if subtype is not None:
+        if subtype is not None and subtype != "file_share":
             return
 
         if self._is_duplicate_event(event):
