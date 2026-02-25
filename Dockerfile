@@ -1,4 +1,4 @@
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 RUN pip install --no-cache-dir poetry==2.3.2
 
@@ -9,7 +9,7 @@ COPY pyproject.toml poetry.lock ./
 RUN poetry config virtualenvs.in-project true && \
     poetry install --no-interaction --no-ansi --only main --no-root
 
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 

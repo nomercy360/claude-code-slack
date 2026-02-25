@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Slack bot providing remote access to Claude Code. Python 3.11+, built with Poetry, using `slack-bolt` for Slack and `claude-agent-sdk` for Claude Code integration.
+Slack bot providing remote access to Claude Code. Python 3.14+, built with Poetry, using `slack-bolt` for Slack and `claude-agent-sdk` for Claude Code integration.
 
 ## Commands
 

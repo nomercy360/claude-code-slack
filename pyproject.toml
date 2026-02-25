@@ -13,13 +13,12 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Software Development",
     "Topic :: System :: Shells",
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dynamic = ["dependencies"]
 
 [project.urls]
@@ -38,7 +37,7 @@ build-backend = "poetry.core.masonry.api"
 packages = [{include = "src"}]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.14"
 slack-bolt = "^1.18"
 slack-sdk = "^3.27"
 structlog = "^25.4.0"
@@ -68,7 +67,7 @@ autoflake = "^2.3.2"
 
 [tool.black]
 line-length = 88
-target-version = ['py311']
+target-version = ['py314']
 
 [tool.isort]
 profile = "black"
@@ -81,7 +80,7 @@ addopts = "-v --cov=src --cov-report=html --cov-report=term-missing"
 asyncio_mode = "auto"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
