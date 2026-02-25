@@ -40,10 +40,15 @@ from src.storage.session_storage import SQLiteSessionStorage
 
 
 def setup_logging(debug: bool = False) -> None:
-    """Configure structured logging."""
+    """Configure structured logging.
+
+    Routes *all* stdlib logging (including Slack Bolt / SDK) through
+    structlog's processor pipeline so every line is JSON (or
+    ConsoleRenderer in debug mode).
+    """
     level = logging.DEBUG if debug else logging.INFO
 
-    # Shared processors for both structlog and stdlib logging
+    # Shared processor chain used by both structlog-native and stdlib loggers
     shared_processors: list[structlog.types.Processor] = [
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
@@ -55,17 +60,16 @@ def setup_logging(debug: bool = False) -> None:
     ]
 
     renderer: structlog.types.Processor = (
-        structlog.dev.ConsoleRenderer()
-        if debug
-        else structlog.processors.JSONRenderer()
+        structlog.dev.ConsoleRenderer() if debug else structlog.processors.JSONRenderer()
     )
 
-    # Configure structlog
+    # Configure structlog itself
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,
             *shared_processors,
-            renderer,
+            # Wrap for stdlib integration
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
@@ -73,7 +77,8 @@ def setup_logging(debug: bool = False) -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Configure standard logging to route through structlog (captures Bolt/SDK logs as JSON)
+    # Build a ProcessorFormatter that also handles "foreign" (non-structlog)
+    # log records — this is how Slack Bolt / SDK logs get rendered as JSON.
     formatter = structlog.stdlib.ProcessorFormatter(
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
@@ -82,6 +87,7 @@ def setup_logging(debug: bool = False) -> None:
         foreign_pre_chain=shared_processors,
     )
 
+    # Replace the root logger's handler with our structlog-powered one
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
 
@@ -89,10 +95,6 @@ def setup_logging(debug: bool = False) -> None:
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
     root_logger.setLevel(level)
-
-    # Reduce noise from Slack SDK internals
-    logging.getLogger("slack_bolt").setLevel(logging.WARNING)
-    logging.getLogger("slack_sdk").setLevel(logging.WARNING)
 
 
 def parse_args() -> argparse.Namespace:
