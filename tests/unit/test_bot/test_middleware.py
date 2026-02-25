@@ -22,7 +22,6 @@ def mock_settings():
     settings.slack_bot_token_str = "xoxb-test-token"
     settings.slack_signing_secret_str = "test-signing-secret"
     settings.slack_app_token_str = "xapp-test-token"
-    settings.agentic_mode = True
     settings.enable_mcp = False
     settings.enable_api_server = False
     settings.enable_scheduler = False

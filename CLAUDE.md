@@ -34,7 +34,7 @@ Sessions auto-resume: per user+directory, persisted in SQLite.
 
 ### Request Flow
 
-**Agentic mode** (default, `AGENTIC_MODE=true`):
+**Request flow:**
 
 ```
 Slack message -> Security middleware -> Auth middleware
@@ -80,7 +80,7 @@ Webhook authentication: GitHub HMAC-SHA256 signature verification, generic Beare
 
 Settings loaded from environment variables via Pydantic Settings. Required: `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `APPROVED_DIRECTORY`. Key optional: `ALLOWED_USERS` (comma-separated Slack user IDs), `ANTHROPIC_API_KEY`, `ENABLE_MCP`, `MCP_CONFIG_PATH`.
 
-Agentic platform settings: `AGENTIC_MODE` (default true), `ENABLE_API_SERVER`, `API_SERVER_PORT` (default 8080), `GITHUB_WEBHOOK_SECRET`, `WEBHOOK_API_SECRET`, `ENABLE_SCHEDULER`, `NOTIFICATION_CHANNEL_IDS`.
+Agentic platform settings: `ENABLE_API_SERVER`, `API_SERVER_PORT` (default 8080), `GITHUB_WEBHOOK_SECRET`, `WEBHOOK_API_SECRET`, `ENABLE_SCHEDULER`, `NOTIFICATION_CHANNEL_IDS`.
 
 Security relaxation (trusted environments only): `DISABLE_SECURITY_PATTERNS` (default false), `DISABLE_TOOL_VALIDATION` (default false).
 

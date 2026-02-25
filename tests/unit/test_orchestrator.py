@@ -18,7 +18,7 @@ def tmp_dir():
 
 @pytest.fixture
 def agentic_settings(tmp_dir):
-    return create_test_config(approved_directory=str(tmp_dir), agentic_mode=True)
+    return create_test_config(approved_directory=str(tmp_dir))
 
 
 @pytest.fixture

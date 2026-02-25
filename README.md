@@ -134,7 +134,6 @@ CLAUDE_MAX_COST_PER_USER=10.0    # Spending limit per user (USD)
 CLAUDE_TIMEOUT_SECONDS=300       # Operation timeout
 
 # Mode
-AGENTIC_MODE=true                # Agentic (default) or classic mode
 VERBOSE_LEVEL=1                  # 0=quiet, 1=normal (default), 2=detailed
 
 # Rate Limiting
