@@ -254,6 +254,7 @@ class ClaudeSDKManager:
                 allowed_tools=self.config.claude_allowed_tools,
                 disallowed_tools=self.config.claude_disallowed_tools,
                 cli_path=cli_path,
+                setting_sources=["user", "project"],
                 sandbox={
                     "enabled": self.config.sandbox_enabled,
                     "autoAllowBashIfSandboxed": True,

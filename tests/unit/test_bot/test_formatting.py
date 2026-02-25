@@ -8,6 +8,7 @@ from src.bot.utils.formatting import (
     FormattedMessage,
     ResponseFormatter,
 )
+from src.bot.utils.slack_format import markdown_to_slack_mrkdwn
 from src.config.settings import Settings
 
 
@@ -176,3 +177,145 @@ class TestOversizedResponseIntegration:
         full = "".join(m.text for m in messages)
         assert "Section 0" in full
         assert "Section 9" in full
+
+
+class TestMarkdownToSlackMrkdwn:
+    """Tests for markdown_to_slack_mrkdwn converter."""
+
+    # --- Bold ---
+
+    def test_bold_double_asterisk(self):
+        assert markdown_to_slack_mrkdwn("**bold**") == "*bold*"
+
+    def test_bold_double_underscore(self):
+        assert markdown_to_slack_mrkdwn("__bold__") == "*bold*"
+
+    def test_bold_multiple(self):
+        assert markdown_to_slack_mrkdwn("**one** and **two**") == "*one* and *two*"
+
+    # --- Strikethrough ---
+
+    def test_strikethrough(self):
+        assert markdown_to_slack_mrkdwn("~~deleted~~") == "~deleted~"
+
+    # --- Headers ---
+
+    def test_h1(self):
+        assert markdown_to_slack_mrkdwn("# Title") == "*Title*"
+
+    def test_h3(self):
+        assert markdown_to_slack_mrkdwn("### Section") == "*Section*"
+
+    def test_header_multiline(self):
+        text = "## First\nsome text\n### Second"
+        result = markdown_to_slack_mrkdwn(text)
+        assert result == "*First*\nsome text\n*Second*"
+
+    def test_header_with_bold(self):
+        """### 1. **name** should become *1. name* (not nested *1. *name**)."""
+        result = markdown_to_slack_mrkdwn("### 1. **keybindings-help**")
+        # Bold inside header — bold converts first, then header wraps
+        assert "keybindings-help" in result
+        assert "###" not in result
+
+    # --- Links ---
+
+    def test_link(self):
+        assert (
+            markdown_to_slack_mrkdwn("[click](https://example.com)")
+            == "<https://example.com|click>"
+        )
+
+    def test_link_with_special_chars(self):
+        result = markdown_to_slack_mrkdwn("[docs](https://example.com/a?b=1&c=2)")
+        assert "<https://example.com/a?b=1&c=2|docs>" == result
+
+    # --- Code protection ---
+
+    def test_inline_code_not_converted(self):
+        """Bold markers inside inline code must not be touched."""
+        text = "use `**kwargs` in Python"
+        result = markdown_to_slack_mrkdwn(text)
+        assert "`**kwargs`" in result
+
+    def test_fenced_code_block_not_converted(self):
+        """Content inside fenced code blocks must not be touched."""
+        text = "text\n```python\nx = **kwargs\n# ## not a header\n```\nmore"
+        result = markdown_to_slack_mrkdwn(text)
+        assert "**kwargs" in result
+        assert "## not a header" in result
+
+    def test_code_block_with_bold_outside(self):
+        text = "**bold** then\n```\ncode\n```\nthen **bold**"
+        result = markdown_to_slack_mrkdwn(text)
+        assert result.startswith("*bold*")
+        assert result.endswith("*bold*")
+        assert "```\ncode\n```" in result
+
+    # --- Italic (passthrough) ---
+
+    def test_italic_unchanged(self):
+        """Single underscores (italic) should pass through as-is."""
+        assert markdown_to_slack_mrkdwn("_italic_") == "_italic_"
+
+    # --- Slack token preservation ---
+
+    def test_user_mention_preserved(self):
+        """<@U123ABC> must not be mangled."""
+        text = "Hello <@U123ABC>, how are you?"
+        assert markdown_to_slack_mrkdwn(text) == text
+
+    def test_channel_link_preserved(self):
+        """<#C123|general> must not be mangled."""
+        text = "See <#C0G9QF9GW|general> for details"
+        assert markdown_to_slack_mrkdwn(text) == text
+
+    def test_subteam_mention_preserved(self):
+        """<!subteam^SAZ94GDB8|@team> must not be mangled."""
+        text = "Ping <!subteam^SAZ94GDB8|@team>"
+        assert markdown_to_slack_mrkdwn(text) == text
+
+    def test_slack_url_preserved(self):
+        """<https://example.com|click> must not be mangled."""
+        text = "Visit <https://example.com|click here> for info"
+        assert markdown_to_slack_mrkdwn(text) == text
+
+    def test_slack_tokens_mixed_with_bold(self):
+        """Slack tokens survive alongside bold conversion."""
+        text = "**Hello** <@U123> in <#C456|ch>"
+        result = markdown_to_slack_mrkdwn(text)
+        assert "*Hello*" in result
+        assert "<@U123>" in result
+        assert "<#C456|ch>" in result
+
+    # --- No-op cases ---
+
+    def test_plain_text_unchanged(self):
+        assert markdown_to_slack_mrkdwn("hello world") == "hello world"
+
+    def test_empty_string(self):
+        assert markdown_to_slack_mrkdwn("") == ""
+
+    # --- Real-world Claude output ---
+
+    def test_typical_claude_response(self):
+        """Simulate the kind of response from the screenshot."""
+        text = (
+            "Based on the system reminder, there are **2 skills** available:\n\n"
+            "### 1. **keybindings-help**\n"
+            "**When to use:** Customization\n"
+            "- Rebind keys\n"
+            "- Edit `~/.claude/keybindings.json`\n\n"
+            "### 2. **mirror-rotation**\n"
+            "---\n"
+            "Want to invoke one?"
+        )
+        result = markdown_to_slack_mrkdwn(text)
+        # No raw markdown should remain
+        assert "**" not in result
+        assert "###" not in result
+        # Bold converted
+        assert "*2 skills*" in result
+        assert "*When to use:*" in result
+        # Inline code preserved
+        assert "`~/.claude/keybindings.json`" in result

@@ -363,6 +363,7 @@ class TestMentionGating:
         say = AsyncMock()
         client = AsyncMock()
         client.chat_postMessage.return_value = {"ts": "1234.0001"}
+        client.conversations_replies.return_value = {"messages": []}
 
         event = {
             "text": "hello",
@@ -402,6 +403,7 @@ class TestMentionGating:
         say = AsyncMock()
         client = AsyncMock()
         client.chat_postMessage.return_value = {"ts": "1234.0002"}
+        client.conversations_replies.return_value = {"messages": []}
 
         event = {
             "text": "<@UBOT> hello",
@@ -422,6 +424,7 @@ class TestMentionGating:
         say = AsyncMock()
         client = AsyncMock()
         client.chat_postMessage.return_value = {"ts": "1234.0003"}
+        client.conversations_replies.return_value = {"messages": []}
 
         event = {
             "text": "hello",

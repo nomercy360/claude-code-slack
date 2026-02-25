@@ -40,6 +40,12 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
         placeholders.append((key, content))
         return key
 
+    # Protect Slack tokens: <@U123>, <#C123|name>, <http...>, <!subteam^...>, etc.
+    def _protect_slack_token(m: re.Match) -> str:  # type: ignore[type-arg]
+        return _placeholder(m.group(0))
+
+    text = re.sub(r"<[!@#][^>]*>|<https?://[^>]+>", _protect_slack_token, text)
+
     # Protect fenced code blocks (```...```)
     def _protect_fenced(m: re.Match) -> str:  # type: ignore[type-arg]
         return _placeholder(m.group(0))
@@ -52,6 +58,14 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
 
     text = re.sub(r"`[^`\n]+`", _protect_inline, text)
 
+    # Convert headers first: # Header -> *Header*
+    # Strip any bold markers (**) inside the header text to avoid nested *...*
+    def _convert_header(m: re.Match) -> str:  # type: ignore[type-arg]
+        content = m.group(1).replace("**", "")
+        return f"*{content}*"
+
+    text = re.sub(r"^#{1,6}\s+(.+)$", _convert_header, text, flags=re.MULTILINE)
+
     # Convert bold: **text** -> *text*
     text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
     # __text__ -> *text*
@@ -62,9 +76,6 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
 
     # Convert links: [text](url) -> <url|text>
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
-
-    # Convert headers: # Header -> *Header*
-    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
 
     # Restore placeholders
     for key, content in placeholders:

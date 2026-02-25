@@ -15,8 +15,10 @@ from slack_bolt.async_app import AsyncApp
 from ..claude.sdk_integration import StreamUpdate
 from ..config.settings import Settings
 from .utils.cache import SlackInfoCache, infer_channel_type
+from .utils.formatting import ResponseFormatter
 from .utils.reactions import ReactionManager
 from .utils.retry import slack_api_call
+from .utils.thread_history import fetch_thread_context
 
 logger = structlog.get_logger()
 
@@ -113,16 +115,22 @@ class MessageOrchestrator:
         # the same message via both `message` and `app_mention` events.
         self._processed_events: Dict[str, float] = {}
 
-    def _get_user_state(self, user_id: str) -> Dict[str, Any]:
-        """Get or create per-user state dict."""
-        if user_id not in self._user_state:
-            self._user_state[user_id] = {
+    def _get_user_state(self, user_id: str, thread_ts: str = "") -> Dict[str, Any]:
+        """Get or create per-user (optionally per-thread) state dict.
+
+        When *thread_ts* is provided the state is scoped to a specific Slack
+        thread so that each thread gets its own Claude session. Slash commands
+        that lack thread context pass no thread_ts and get global user state.
+        """
+        key = f"{user_id}:{thread_ts}" if thread_ts else user_id
+        if key not in self._user_state:
+            self._user_state[key] = {
                 "current_directory": self.settings.approved_directory,
                 "claude_session_id": None,
                 "force_new_session": False,
                 "verbose_level": None,  # None = use global default
             }
-        return self._user_state[user_id]
+        return self._user_state[key]
 
     def register_handlers(self, app: AsyncApp) -> None:
         """Register Slack Bolt handlers (agentic mode only)."""
@@ -617,7 +625,7 @@ class MessageOrchestrator:
             message_length=len(text),
         )
 
-        state = self._get_user_state(user_id)
+        state = self._get_user_state(user_id, thread_ts)
 
         # Emoji reaction on the user's original message
         reactions: Optional[ReactionManager] = None
@@ -677,10 +685,23 @@ class MessageOrchestrator:
             reactions=reactions,
         )
 
+        # Fetch thread history for context
+        thread_context = await fetch_thread_context(
+            client, channel_id, thread_ts, self._bot_user_id
+        )
+        if thread_context:
+            prompt = (
+                "[Thread context — prior messages in this Slack thread]\n"
+                f"{thread_context}\n\n"
+                f"[Current message]\n{text}"
+            )
+        else:
+            prompt = text
+
         success = True
         try:
             claude_response = await claude_integration.run_command(
-                prompt=text,
+                prompt=prompt,
                 working_directory=current_dir,
                 user_id=user_id,
                 session_id=session_id,
@@ -724,28 +745,19 @@ class MessageOrchestrator:
         except Exception:
             pass
 
-        # Split long messages if needed (Slack limit ~40k chars, use 39k for safety)
-        from ..utils.constants import SAFE_MESSAGE_LENGTH
+        # Format (Markdown -> Slack mrkdwn, clean whitespace, split long messages)
+        formatter = ResponseFormatter(self.settings)
+        formatted = formatter.format_claude_response(response_text)
 
-        if len(response_text) <= SAFE_MESSAGE_LENGTH:
+        for i, msg in enumerate(formatted):
             await slack_api_call(
                 client.chat_postMessage,
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=response_text,
+                text=msg.text,
             )
-        else:
-            # Split into chunks
-            chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
-            for i, chunk in enumerate(chunks):
-                await slack_api_call(
-                    client.chat_postMessage,
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=chunk,
-                )
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+            if i < len(formatted) - 1:
+                await asyncio.sleep(0.5)
 
         # Audit log
         audit_logger = self.deps.get("audit_logger")
@@ -774,7 +786,7 @@ class MessageOrchestrator:
             file_count=len(files),
         )
 
-        state = self._get_user_state(user_id)
+        state = self._get_user_state(user_id, thread_ts)
 
         # Emoji reaction on the user's original message
         reactions: Optional[ReactionManager] = None
@@ -941,26 +953,19 @@ class MessageOrchestrator:
         except Exception:
             pass
 
-        from ..utils.constants import SAFE_MESSAGE_LENGTH
+        # Format (Markdown -> Slack mrkdwn, clean whitespace, split long messages)
+        formatter = ResponseFormatter(self.settings)
+        formatted = formatter.format_claude_response(response_text)
 
-        if len(response_text) <= SAFE_MESSAGE_LENGTH:
+        for i, msg in enumerate(formatted):
             await slack_api_call(
                 client.chat_postMessage,
                 channel=channel_id,
                 thread_ts=thread_ts,
-                text=response_text,
+                text=msg.text,
             )
-        else:
-            chunks = self._split_message(response_text, SAFE_MESSAGE_LENGTH)
-            for i, chunk in enumerate(chunks):
-                await slack_api_call(
-                    client.chat_postMessage,
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=chunk,
-                )
-                if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+            if i < len(formatted) - 1:
+                await asyncio.sleep(0.5)
 
     # --- Block Kit action handler ---
 

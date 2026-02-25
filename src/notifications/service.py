@@ -102,8 +102,11 @@ class NotificationService:
             await asyncio.sleep(wait_time)
 
         try:
-            text = event.text
+            from ..bot.utils.slack_format import markdown_to_slack_mrkdwn
+
+            text = markdown_to_slack_mrkdwn(event.text)
             chunks = self._split_message(text)
+
 
             for chunk in chunks:
                 kwargs: dict = {
