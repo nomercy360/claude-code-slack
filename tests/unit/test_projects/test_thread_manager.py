@@ -7,9 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from slack_sdk.errors import SlackApiError
 
-import src.projects.thread_manager as thread_manager_module
 from src.projects import (
-    ChannelSyncUnavailableError,
     ProjectThreadManager,
     load_project_registry,
 )
