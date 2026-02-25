@@ -394,11 +394,7 @@ class ClaudeSDKManager:
             )
 
             num_turns = len(
-                [
-                    m
-                    for m in messages
-                    if isinstance(m, (UserMessage, AssistantMessage))
-                ]
+                [m for m in messages if isinstance(m, (UserMessage, AssistantMessage))]
             )
 
             # Warn if we hit or approached the max_turns limit

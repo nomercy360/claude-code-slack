@@ -107,7 +107,6 @@ class NotificationService:
             text = markdown_to_slack_mrkdwn(event.text)
             chunks = self._split_message(text)
 
-
             for chunk in chunks:
                 kwargs: dict = {
                     "channel": channel_id,

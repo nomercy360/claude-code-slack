@@ -60,7 +60,9 @@ def setup_logging(debug: bool = False) -> None:
     ]
 
     renderer: structlog.types.Processor = (
-        structlog.dev.ConsoleRenderer() if debug else structlog.processors.JSONRenderer()
+        structlog.dev.ConsoleRenderer()
+        if debug
+        else structlog.processors.JSONRenderer()
     )
 
     # Configure structlog itself
