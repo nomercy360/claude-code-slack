@@ -1,0 +1,7 @@
+FROM claude-code-slack:base
+
+# Git + SSH for repo cloning; uv for MCP servers that use uvx
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git openssh-client && \
+    pip install --no-cache-dir uv && \
+    rm -rf /var/lib/apt/lists/*

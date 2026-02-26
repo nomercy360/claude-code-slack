@@ -77,8 +77,64 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
     # Convert links: [text](url) -> <url|text>
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
 
+    # Convert Markdown tables to fixed-width text blocks.
+    # Matches a header row, separator row (|---|---|), and body rows.
+    text = _convert_tables(text)
+
     # Restore placeholders
     for key, content in placeholders:
         text = text.replace(key, content)
 
     return text
+
+
+def _convert_tables(text: str) -> str:
+    """Convert Markdown tables to monospaced text blocks for Slack.
+
+    Slack has no table support, so we render them as ```code blocks```
+    with aligned columns.
+    """
+    table_pattern = re.compile(
+        r"((?:^\|.+\|[ \t]*\n)+"  # one or more pipe-delimited rows
+        r"(?:^\|[-| :]+\|[ \t]*\n)"  # separator row  |---|---|
+        r"(?:^\|.+\|[ \t]*\n?)*)",  # remaining body rows (last may lack \n)
+        re.MULTILINE,
+    )
+
+    def _format_table(m: re.Match) -> str:  # type: ignore[type-arg]
+        block = m.group(0)
+        rows: list[list[str]] = []
+        for line in block.strip().splitlines():
+            # Skip separator rows (|---|---|)
+            stripped = line.strip().strip("|")
+            if re.match(r"^[\s|:-]+$", stripped):
+                continue
+            cells = [c.strip() for c in stripped.split("|")]
+            rows.append(cells)
+
+        if not rows:
+            return block
+
+        # Calculate column widths
+        n_cols = max(len(r) for r in rows)
+        col_widths = [0] * n_cols
+        for row in rows:
+            for i, cell in enumerate(row):
+                if i < n_cols:
+                    col_widths[i] = max(col_widths[i], len(cell))
+
+        # Format rows with padding
+        formatted: list[str] = []
+        for ri, row in enumerate(rows):
+            parts = []
+            for i in range(n_cols):
+                cell = row[i] if i < len(row) else ""
+                parts.append(cell.ljust(col_widths[i]))
+            formatted.append("  ".join(parts))
+            # Add separator after header row
+            if ri == 0:
+                formatted.append("  ".join("-" * w for w in col_widths))
+
+        return "```\n" + "\n".join(formatted) + "\n```\n"
+
+    return table_pattern.sub(_format_table, text)
