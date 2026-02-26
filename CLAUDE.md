@@ -106,7 +106,7 @@ All datetimes use timezone-aware UTC: `datetime.now(UTC)` (not `datetime.utcnow(
 
 ### Agentic mode
 
-Agentic mode commands: `/claude-start`, `/claude-new`, `/claude-status`, `/claude-verbose`, `/claude-repo`. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. To add a new command:
+Agentic mode commands: `/claude-start`, `/claude-status`, `/claude-verbose`, `/claude-repo`. If `ENABLE_PROJECT_THREADS=true`: `/sync_threads`. Each Slack thread gets its own Claude session automatically. To add a new command:
 
 1. Add handler function in `src/bot/orchestrator.py`
 2. Register in `MessageOrchestrator._register_agentic_handlers()`

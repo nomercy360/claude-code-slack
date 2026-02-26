@@ -18,7 +18,7 @@ from .utils.cache import SlackInfoCache, infer_channel_type
 from .utils.formatting import ResponseFormatter
 from .utils.reactions import ReactionManager
 from .utils.retry import slack_api_call
-from .utils.thread_history import fetch_thread_context
+from .utils.thread_history import fetch_thread_context, fetch_unseen_thread_messages
 
 logger = structlog.get_logger()
 
@@ -124,10 +124,16 @@ class MessageOrchestrator:
         """
         key = f"{user_id}:{thread_ts}" if thread_ts else user_id
         if key not in self._user_state:
+            # For thread-specific state, inherit current_directory from
+            # the user's global state so that /claude-repo switches carry
+            # over into new threads.
+            if thread_ts and user_id in self._user_state:
+                default_dir = self._user_state[user_id]["current_directory"]
+            else:
+                default_dir = self.settings.approved_directory
             self._user_state[key] = {
-                "current_directory": self.settings.approved_directory,
+                "current_directory": default_dir,
                 "claude_session_id": None,
-                "force_new_session": False,
                 "verbose_level": None,  # None = use global default
             }
         return self._user_state[key]
@@ -136,7 +142,6 @@ class MessageOrchestrator:
         """Register Slack Bolt handlers (agentic mode only)."""
         # Slash commands
         app.command("/claude-start")(self.agentic_start)
-        app.command("/claude-new")(self.agentic_new)
         app.command("/claude-status")(self.agentic_status)
         app.command("/claude-verbose")(self.agentic_verbose)
         app.command("/claude-repo")(self.agentic_repo)
@@ -171,24 +176,9 @@ class MessageOrchestrator:
                 f"Hi <@{user_id}>! I'm your AI coding assistant.\n"
                 f"Just tell me what you need — I can read, write, and run code.\n\n"
                 f"Working in: {dir_display}\n"
-                f"Commands: /claude-new (reset) · /claude-status"
+                f"Each thread gets its own session.\n"
+                f"Commands: /claude-status · /claude-repo"
             ),
-        )
-
-    async def agentic_new(self, ack: Callable, command: dict, client: Any) -> None:
-        """Reset session, one-line confirmation."""
-        await ack()
-
-        user_id = command["user_id"]
-        channel_id = command["channel_id"]
-        state = self._get_user_state(user_id)
-
-        state["claude_session_id"] = None
-        state["force_new_session"] = True
-
-        await client.chat_postMessage(
-            channel=channel_id,
-            text="Session reset. What's next?",
         )
 
     async def agentic_status(self, ack: Callable, command: dict, client: Any) -> None:
@@ -297,24 +287,20 @@ class MessageOrchestrator:
 
             state["current_directory"] = target_path
 
-            # Try to find a resumable session
-            claude_integration = self.deps.get("claude_integration")
-            session_id = None
-            if claude_integration:
-                existing = await claude_integration._find_resumable_session(
-                    user_id, target_path
-                )
-                if existing:
-                    session_id = existing.session_id
-            state["claude_session_id"] = session_id
+            # Propagate directory change to all existing thread states
+            # for this user so future messages in those threads use the
+            # new directory (they will start fresh sessions automatically).
+            prefix = f"{user_id}:"
+            for k, v in self._user_state.items():
+                if k.startswith(prefix):
+                    v["current_directory"] = target_path
 
             is_git = (target_path / ".git").is_dir()
             git_badge = " (git)" if is_git else ""
-            session_badge = " · session resumed" if session_id else ""
 
             await client.chat_postMessage(
                 channel=channel_id,
-                text=f"Switched to `{_escape_mrkdwn(target_name)}/`{git_badge}{session_badge}",
+                text=f"Switched to `{_escape_mrkdwn(target_name)}/`{git_badge}",
             )
             return
 
@@ -670,7 +656,6 @@ class MessageOrchestrator:
 
         current_dir = state["current_directory"]
         session_id = state.get("claude_session_id")
-        force_new = bool(state.get("force_new_session"))
 
         verbose_level = self._get_verbose_level(user_id)
         tool_log: List[Dict[str, Any]] = []
@@ -685,16 +670,28 @@ class MessageOrchestrator:
             reactions=reactions,
         )
 
-        # Fetch thread history for context
-        thread_context = await fetch_thread_context(
-            client, channel_id, thread_ts, self._bot_user_id
-        )
-        if thread_context:
-            prompt = (
-                "[Thread context — prior messages in this Slack thread]\n"
-                f"{thread_context}\n\n"
-                f"[Current message]\n{text}"
+        # Fetch thread history for context.
+        # - New session: fetch ALL prior messages in the thread.
+        # - Resumed session: fetch only messages after the bot's last reply
+        #   (user messages without @mention that Claude hasn't seen).
+        if not session_id:
+            thread_context = await fetch_thread_context(
+                client, channel_id, thread_ts, self._bot_user_id
             )
+        else:
+            thread_context = await fetch_unseen_thread_messages(
+                client, channel_id, thread_ts, self._bot_user_id
+            )
+
+        if thread_context:
+            if session_id:
+                header = (
+                    "[New messages in this Slack thread since your last reply"
+                    " — the user did not @mention you for these]"
+                )
+            else:
+                header = "[Thread context — prior messages in this Slack thread]"
+            prompt = f"{header}\n{thread_context}\n\n[Current message]\n{text}"
         else:
             prompt = text
 
@@ -706,11 +703,7 @@ class MessageOrchestrator:
                 user_id=user_id,
                 session_id=session_id,
                 on_stream=on_stream,
-                force_new=force_new,
             )
-
-            if force_new:
-                state["force_new_session"] = False
 
             state["claude_session_id"] = claude_response.session_id
 
@@ -905,7 +898,6 @@ class MessageOrchestrator:
 
         current_dir = state["current_directory"]
         session_id = state.get("claude_session_id")
-        force_new = bool(state.get("force_new_session"))
 
         verbose_level = self._get_verbose_level(user_id)
         tool_log: List[Dict[str, Any]] = []
@@ -928,11 +920,7 @@ class MessageOrchestrator:
                 user_id=user_id,
                 session_id=session_id,
                 on_stream=on_stream,
-                force_new=force_new,
             )
-
-            if force_new:
-                state["force_new_session"] = False
 
             state["claude_session_id"] = claude_response.session_id
 
@@ -991,20 +979,8 @@ class MessageOrchestrator:
 
         state["current_directory"] = new_path
 
-        # Look for a resumable session
-        claude_integration = self.deps.get("claude_integration")
-        session_id = None
-        if claude_integration:
-            existing = await claude_integration._find_resumable_session(
-                user_id, new_path
-            )
-            if existing:
-                session_id = existing.session_id
-        state["claude_session_id"] = session_id
-
         is_git = (new_path / ".git").is_dir()
         git_badge = " (git)" if is_git else ""
-        session_badge = " · session resumed" if session_id else ""
 
         # Update the original message to show selection
         message_ts = body.get("message", {}).get("ts")
@@ -1012,13 +988,13 @@ class MessageOrchestrator:
             await client.chat_update(
                 channel=channel_id,
                 ts=message_ts,
-                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}{session_badge}",
+                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}",
                 blocks=[],  # Remove buttons
             )
         else:
             await client.chat_postMessage(
                 channel=channel_id,
-                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}{session_badge}",
+                text=f"Switched to `{_escape_mrkdwn(project_name)}/`{git_badge}",
             )
 
         # Audit log

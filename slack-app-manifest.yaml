@@ -14,9 +14,6 @@ features:
     - command: /claude-start
       description: Start the bot and show welcome message
       should_escape: false
-    - command: /claude-new
-      description: Reset session and start fresh
-      should_escape: false
     - command: /claude-status
       description: Show current session status
       should_escape: false

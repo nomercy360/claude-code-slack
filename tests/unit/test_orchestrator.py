@@ -41,7 +41,6 @@ def test_register_handlers(agentic_settings, deps):
 
     # Slash commands
     app.command.assert_any_call("/claude-start")
-    app.command.assert_any_call("/claude-new")
     app.command.assert_any_call("/claude-status")
     app.command.assert_any_call("/claude-verbose")
     app.command.assert_any_call("/claude-repo")
@@ -72,31 +71,6 @@ async def test_agentic_start_sends_welcome(agentic_settings, deps):
     call_kwargs = client.chat_postMessage.call_args.kwargs
     assert call_kwargs["channel"] == "C456"
     assert "<@U123>" in call_kwargs["text"]
-
-
-async def test_agentic_new_resets_session(agentic_settings, deps):
-    """Agentic /new clears session and sends brief confirmation."""
-    orchestrator = MessageOrchestrator(agentic_settings, deps)
-
-    ack = AsyncMock()
-    client = AsyncMock()
-    command = {
-        "user_id": "U123",
-        "channel_id": "C456",
-        "text": "",
-    }
-
-    # First set a session
-    state = orchestrator._get_user_state("U123")
-    state["claude_session_id"] = "old-session-123"
-
-    await orchestrator.agentic_new(ack=ack, command=command, client=client)
-
-    ack.assert_called_once()
-    assert state["claude_session_id"] is None
-    assert state["force_new_session"] is True
-    client.chat_postMessage.assert_called_once()
-    assert "Session reset" in client.chat_postMessage.call_args.kwargs["text"]
 
 
 async def test_agentic_status_compact(agentic_settings, deps):

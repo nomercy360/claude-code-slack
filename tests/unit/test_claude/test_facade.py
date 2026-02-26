@@ -1,14 +1,12 @@
-"""Test ClaudeIntegration facade — force_new skips auto-resume."""
+"""Test ClaudeIntegration facade — per-thread session model."""
 
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.claude.facade import ClaudeIntegration
-from src.claude.session import ClaudeSession, InMemorySessionStorage, SessionManager
+from src.claude.session import InMemorySessionStorage, SessionManager
 from src.config.settings import Settings
 
 
@@ -23,15 +21,6 @@ def _make_mock_response(session_id: str = "new-session-id") -> MagicMock:
     resp.is_error = False
     resp.content = "ok"
     return resp
-
-
-def _make_user_data(force_new: bool = False) -> Dict[str, Any]:
-    """Simulate context.user_data dict as the handlers would see it."""
-    return {
-        "claude_session_id": None,
-        "session_started": True,
-        "force_new_session": force_new,
-    }
 
 
 @pytest.fixture
@@ -57,7 +46,6 @@ def session_manager(config):
 def facade(config, session_manager):
     """Create facade with mocked SDK manager."""
     sdk_manager = MagicMock()
-
     integration = ClaudeIntegration(
         config=config,
         sdk_manager=sdk_manager,
@@ -66,229 +54,113 @@ def facade(config, session_manager):
     return integration
 
 
-class TestForceNewSkipsAutoResume:
-    """Verify that force_new=True prevents _find_resumable_session."""
+class TestPerThreadSessions:
+    """Each thread gets its own session. No cross-thread auto-resume."""
 
-    async def test_auto_resume_finds_existing_session(self, facade, session_manager):
-        """Without force_new, run_command auto-resumes an existing session."""
+    async def test_no_session_id_creates_new_session(self, facade):
+        """When session_id is None, a new Claude session is created."""
         project = Path("/test/project")
-        user_id = "U123"
-
-        # Seed an existing non-temp session in storage
-        existing = ClaudeSession(
-            session_id="real-session-id",
-            user_id=user_id,
-            project_path=project,
-            created_at=datetime.utcnow(),
-            last_used=datetime.utcnow(),
-        )
-        await session_manager.storage.save_session(existing)
-        session_manager.active_sessions[existing.session_id] = existing
-
-        # _find_resumable_session should find it
-        found = await facade._find_resumable_session(user_id, project)
-        assert found is not None
-        assert found.session_id == "real-session-id"
-
-    async def test_force_new_skips_auto_resume(self, facade, session_manager):
-        """With force_new=True, run_command does NOT auto-resume."""
-        project = Path("/test/project")
-        user_id = "U123"
-
-        # Seed an existing non-temp session
-        existing = ClaudeSession(
-            session_id="real-session-id",
-            user_id=user_id,
-            project_path=project,
-            created_at=datetime.utcnow(),
-            last_used=datetime.utcnow(),
-        )
-        await session_manager.storage.save_session(existing)
-        session_manager.active_sessions[existing.session_id] = existing
-
-        # Mock _find_resumable_session to track whether it's called
-        with patch.object(
-            facade, "_find_resumable_session", wraps=facade._find_resumable_session
-        ) as spy:
-            with patch.object(
-                facade,
-                "_execute",
-                return_value=_make_mock_response(),
-            ):
-                await facade.run_command(
-                    prompt="hello",
-                    working_directory=project,
-                    user_id=user_id,
-                    session_id=None,
-                    force_new=True,
-                )
-
-            # _find_resumable_session should NOT have been called
-            spy.assert_not_called()
-
-
-class TestForceNewSurvivesFailure:
-    """Verify the handler-level contract: force_new_session flag stays set
-    when run_command fails, so the next retry still starts a fresh session."""
-
-    async def _seed_session(
-        self,
-        session_manager: SessionManager,
-        user_id: str = "U123",
-        project: Path = Path("/test/project"),
-    ) -> ClaudeSession:
-        existing = ClaudeSession(
-            session_id="old-session-id",
-            user_id=user_id,
-            project_path=project,
-            created_at=datetime.utcnow(),
-            last_used=datetime.utcnow(),
-        )
-        await session_manager.storage.save_session(existing)
-        session_manager.active_sessions[existing.session_id] = existing
-        return existing
-
-    async def test_flag_survives_run_command_failure(self, facade, session_manager):
-        """If run_command raises, the caller should still see
-        force_new_session=True so the retry skips auto-resume."""
-        project = Path("/test/project")
-        user_id = "U123"
-        await self._seed_session(session_manager, user_id, project)
-
-        user_data = _make_user_data(force_new=True)
-
-        # Simulate what the handler does: read flag, call run_command
-        force_new = bool(user_data.get("force_new_session"))
-        assert force_new is True
 
         with patch.object(
-            facade,
-            "_execute",
-            side_effect=RuntimeError("network timeout"),
+            facade, "_execute", return_value=_make_mock_response("sess-abc")
         ):
-            with pytest.raises(RuntimeError, match="network timeout"):
-                await facade.run_command(
-                    prompt="hello",
-                    working_directory=project,
-                    user_id=user_id,
-                    session_id=None,
-                    force_new=force_new,
-                )
+            result = await facade.run_command(
+                prompt="hello",
+                working_directory=project,
+                user_id="U123",
+                session_id=None,
+            )
 
-        # Handler would NOT have cleared the flag (no success path reached)
-        # so user_data still has it — simulating the handler contract:
-        assert user_data["force_new_session"] is True
+        assert result.session_id == "sess-abc"
 
-    async def test_flag_cleared_after_successful_run(self, facade, session_manager):
-        """After a successful run_command, the handler clears
-        force_new_session so subsequent messages auto-resume normally."""
+    async def test_session_id_resumes_existing(self, facade, session_manager):
+        """When session_id is provided, the existing session is resumed."""
+        from datetime import UTC, datetime
+
+        from src.claude.session import ClaudeSession
+
         project = Path("/test/project")
-        user_id = "U123"
-        await self._seed_session(session_manager, user_id, project)
 
-        user_data = _make_user_data(force_new=True)
-        force_new = bool(user_data.get("force_new_session"))
+        # Seed the session so get_or_create_session can find it
+        existing = ClaudeSession(
+            session_id="sess-abc",
+            user_id="U123",
+            project_path=project,
+            created_at=datetime.now(UTC),
+            last_used=datetime.now(UTC),
+        )
+        await session_manager.storage.save_session(existing)
+        session_manager.active_sessions["sess-abc"] = existing
 
         with patch.object(
-            facade,
-            "_execute",
-            return_value=_make_mock_response(),
-        ):
+            facade, "_execute", return_value=_make_mock_response("sess-abc")
+        ) as mock_exec:
             await facade.run_command(
                 prompt="hello",
                 working_directory=project,
-                user_id=user_id,
-                session_id=None,
-                force_new=force_new,
+                user_id="U123",
+                session_id="sess-abc",
             )
 
-        # Simulate the handler clearing the flag on success
-        if force_new:
-            user_data["force_new_session"] = False
+        # Should have been called with session_id for continuation
+        call_kwargs = mock_exec.call_args[1]
+        assert call_kwargs["session_id"] == "sess-abc"
+        assert call_kwargs["continue_session"] is True
 
-        assert user_data["force_new_session"] is False
+    async def test_resume_failure_falls_back_to_new(self, facade, session_manager):
+        """If resuming fails (e.g. session expired), retry as new session."""
+        from datetime import UTC, datetime
 
-    async def test_retry_after_failure_still_skips_auto_resume(
-        self, facade, session_manager
-    ):
-        """Full scenario: /new -> fail -> retry -> success.
-        Both calls should skip auto-resume; flag cleared only after success."""
+        from src.claude.session import ClaudeSession
+
         project = Path("/test/project")
-        user_id = "U123"
-        await self._seed_session(session_manager, user_id, project)
 
-        user_data = _make_user_data(force_new=True)
+        # Seed session so the facade finds it and attempts to continue
+        existing = ClaudeSession(
+            session_id="stale-sess",
+            user_id="U123",
+            project_path=project,
+            created_at=datetime.now(UTC),
+            last_used=datetime.now(UTC),
+        )
+        await session_manager.storage.save_session(existing)
+        session_manager.active_sessions["stale-sess"] = existing
 
-        # --- First attempt: fails ---
-        force_new = bool(user_data.get("force_new_session"))
-        with patch.object(
-            facade, "_find_resumable_session", wraps=facade._find_resumable_session
-        ) as spy1:
-            with patch.object(
-                facade,
-                "_execute",
-                side_effect=RuntimeError("backend down"),
-            ):
-                with pytest.raises(RuntimeError):
-                    await facade.run_command(
-                        prompt="hello",
-                        working_directory=project,
-                        user_id=user_id,
-                        session_id=None,
-                        force_new=force_new,
-                    )
-            spy1.assert_not_called()
+        call_count = [0]
 
-        # Flag untouched (handler didn't reach success path)
-        assert user_data["force_new_session"] is True
+        async def _side_effect(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("session not found")
+            return _make_mock_response("fresh-sess")
 
-        # --- Second attempt: succeeds ---
-        force_new = bool(user_data.get("force_new_session"))
-        with patch.object(
-            facade, "_find_resumable_session", wraps=facade._find_resumable_session
-        ) as spy2:
-            with patch.object(
-                facade,
-                "_execute",
-                return_value=_make_mock_response(),
-            ):
-                await facade.run_command(
-                    prompt="hello",
-                    working_directory=project,
-                    user_id=user_id,
-                    session_id=None,
-                    force_new=force_new,
-                )
-            spy2.assert_not_called()
+        with patch.object(facade, "_execute", side_effect=_side_effect):
+            result = await facade.run_command(
+                prompt="hello",
+                working_directory=project,
+                user_id="U123",
+                session_id="stale-sess",
+            )
 
-        # Handler clears on success
-        if force_new:
-            user_data["force_new_session"] = False
-        assert user_data["force_new_session"] is False
+        assert result.session_id == "fresh-sess"
+        assert call_count[0] == 2
 
 
 class TestEmptySessionIdWarning:
     """Verify facade warns when final session_id is empty."""
 
-    async def test_empty_session_id_warning_in_facade(self, facade, session_manager):
+    async def test_empty_session_id_warning_in_facade(self, facade):
         """When Claude returns no session_id, facade logs a warning."""
         project = Path("/test/project")
-        user_id = "U456"
 
-        # Return a response with empty session_id
         mock_response = _make_mock_response(session_id="")
 
-        with patch.object(
-            facade,
-            "_execute",
-            return_value=mock_response,
-        ):
+        with patch.object(facade, "_execute", return_value=mock_response):
             result = await facade.run_command(
                 prompt="hello",
                 working_directory=project,
-                user_id=user_id,
+                user_id="U456",
                 session_id=None,
             )
 
-        # Session ID should be empty on the response
         assert not result.session_id

@@ -36,33 +36,20 @@ class ClaudeIntegration:
         user_id: str,
         session_id: Optional[str] = None,
         on_stream: Optional[Callable[[StreamUpdate], None]] = None,
-        force_new: bool = False,
     ) -> ClaudeResponse:
-        """Run Claude Code command with full integration."""
+        """Run Claude Code command with full integration.
+
+        Each Slack thread maintains its own session. The caller (orchestrator)
+        tracks the session_id per thread and passes it here for resumption.
+        When session_id is None a brand-new Claude session is created.
+        """
         logger.info(
             "Running Claude command",
             user_id=user_id,
             working_directory=str(working_directory),
             session_id=session_id,
             prompt_length=len(prompt),
-            force_new=force_new,
         )
-
-        # If no session_id provided, try to find an existing session for this
-        # user+directory combination (auto-resume).
-        # Skip auto-resume when force_new is set (e.g. after /new command).
-        if not session_id and not force_new:
-            existing_session = await self._find_resumable_session(
-                user_id, working_directory
-            )
-            if existing_session:
-                session_id = existing_session.session_id
-                logger.info(
-                    "Auto-resuming existing session for project",
-                    session_id=session_id,
-                    project_path=str(working_directory),
-                    user_id=user_id,
-                )
 
         # Get or create session
         session = await self.session_manager.get_or_create_session(
@@ -160,74 +147,6 @@ class ClaudeIntegration:
             session_id=session_id,
             continue_session=continue_session,
             stream_callback=stream_callback,
-        )
-
-    async def _find_resumable_session(
-        self,
-        user_id: str,
-        working_directory: Path,
-    ) -> Optional["ClaudeSession"]:  # noqa: F821
-        """Find the most recent resumable session for a user in a directory.
-
-        Returns the session if one exists that is non-expired and has a real
-        (non-temporary) session ID from Claude. Returns None otherwise.
-        """
-
-        sessions = await self.session_manager._get_user_sessions(user_id)
-
-        matching_sessions = [
-            s
-            for s in sessions
-            if s.project_path == working_directory
-            and bool(s.session_id)
-            and not s.is_expired(self.config.session_timeout_hours)
-        ]
-
-        if not matching_sessions:
-            return None
-
-        return max(matching_sessions, key=lambda s: s.last_used)
-
-    async def continue_session(
-        self,
-        user_id: str,
-        working_directory: Path,
-        prompt: Optional[str] = None,
-        on_stream: Optional[Callable[[StreamUpdate], None]] = None,
-    ) -> Optional[ClaudeResponse]:
-        """Continue the most recent session."""
-        logger.info(
-            "Continuing session",
-            user_id=user_id,
-            working_directory=str(working_directory),
-            has_prompt=bool(prompt),
-        )
-
-        # Get user's sessions
-        sessions = await self.session_manager._get_user_sessions(user_id)
-
-        # Find most recent session in this directory (exclude sessions without IDs)
-        matching_sessions = [
-            s
-            for s in sessions
-            if s.project_path == working_directory and bool(s.session_id)
-        ]
-
-        if not matching_sessions:
-            logger.info("No matching sessions found", user_id=user_id)
-            return None
-
-        # Get most recent
-        latest_session = max(matching_sessions, key=lambda s: s.last_used)
-
-        # Continue session with default prompt if none provided
-        # Claude CLI requires a prompt, so we use a placeholder
-        return await self.run_command(
-            prompt=prompt or "Please continue where we left off",
-            working_directory=working_directory,
-            user_id=user_id,
-            session_id=latest_session.session_id,
-            on_stream=on_stream,
         )
 
     async def get_session_info(

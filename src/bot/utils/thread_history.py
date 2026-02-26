@@ -10,17 +10,16 @@ logger = structlog.get_logger()
 MAX_CONTEXT_CHARS = 8000
 
 
-async def fetch_thread_context(
+async def _fetch_thread_messages(
     client: Any,
     channel_id: str,
     thread_ts: str,
-    bot_user_id: str,
     max_messages: int = 50,
-) -> str:
-    """Fetch prior messages from a Slack thread and format as context.
+) -> List[dict]:
+    """Fetch messages from a Slack thread via conversations.replies.
 
-    Returns an empty string if the thread has no prior messages (i.e. this
-    is the first message or a top-level message).
+    Returns all messages except the current (last) one, or an empty list
+    on error / if no prior messages exist.
     """
     try:
         result = await client.conversations_replies(
@@ -35,28 +34,33 @@ async def fetch_thread_context(
             thread_ts=thread_ts,
             error=str(e),
         )
-        return ""
+        return []
 
     messages: List[dict] = result.get("messages", [])
 
     if len(messages) <= 1:
-        # No prior messages — this is the first or only message
-        return ""
+        return []
 
     # Exclude the last message (it's the current one being processed)
-    prior = messages[:-1]
+    return messages[:-1]
 
+
+def _format_messages(
+    messages: List[dict],
+    bot_user_id: str,
+    max_chars: int = MAX_CONTEXT_CHARS,
+) -> str:
+    """Format a list of Slack messages into a text context block."""
     lines: List[str] = []
     total_chars = 0
 
-    for msg in prior:
+    for msg in messages:
         user = msg.get("user", "unknown")
         text = msg.get("text", "")
 
         if not text:
             continue
 
-        # Skip bot's own messages
         if user == bot_user_id:
             label = "[Assistant]"
         else:
@@ -64,17 +68,69 @@ async def fetch_thread_context(
 
         line = f"{label}: {text}"
 
-        # Truncate if we'd exceed the budget
-        if total_chars + len(line) > MAX_CONTEXT_CHARS:
-            remaining = MAX_CONTEXT_CHARS - total_chars
+        if total_chars + len(line) > max_chars:
+            remaining = max_chars - total_chars
             if remaining > 50:
                 lines.append(line[:remaining] + "...")
             break
 
         lines.append(line)
-        total_chars += len(line) + 1  # +1 for newline
-
-    if not lines:
-        return ""
+        total_chars += len(line) + 1
 
     return "\n".join(lines)
+
+
+async def fetch_thread_context(
+    client: Any,
+    channel_id: str,
+    thread_ts: str,
+    bot_user_id: str,
+    max_messages: int = 50,
+) -> str:
+    """Fetch ALL prior messages from a Slack thread and format as context.
+
+    Used for the first message in a thread (new session) to give Claude
+    full context of the conversation so far.
+
+    Returns an empty string if no prior messages exist.
+    """
+    prior = await _fetch_thread_messages(client, channel_id, thread_ts, max_messages)
+    if not prior:
+        return ""
+    return _format_messages(prior, bot_user_id)
+
+
+async def fetch_unseen_thread_messages(
+    client: Any,
+    channel_id: str,
+    thread_ts: str,
+    bot_user_id: str,
+    max_messages: int = 50,
+) -> str:
+    """Fetch messages the bot hasn't seen — those after its last reply.
+
+    In channels, the bot only processes @mentions. Messages sent without
+    a mention are invisible to Claude's session. This function returns
+    those "missed" messages so they can be injected as context.
+
+    Returns an empty string if there are no unseen messages.
+    """
+    prior = await _fetch_thread_messages(client, channel_id, thread_ts, max_messages)
+    if not prior:
+        return ""
+
+    # Find the last bot message — everything after it is unseen
+    last_bot_idx = -1
+    for i, msg in enumerate(prior):
+        if msg.get("user") == bot_user_id:
+            last_bot_idx = i
+
+    if last_bot_idx == -1:
+        # Bot never replied in this thread — all messages are unseen
+        return _format_messages(prior, bot_user_id)
+
+    unseen = prior[last_bot_idx + 1 :]
+    if not unseen:
+        return ""
+
+    return _format_messages(unseen, bot_user_id)

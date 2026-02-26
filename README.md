@@ -103,10 +103,9 @@ The bot reacts on your original message to show progress:
 
 ### Commands
 
-**Slash commands:** `/claude-start`, `/claude-new`, `/claude-status`, `/claude-verbose`, `/claude-repo`
+**Slash commands:** `/claude-start`, `/claude-status`, `/claude-verbose`, `/claude-repo`
 
 ```
-/claude-new              -- Reset session
 /claude-status           -- Show current directory, session, cost
 /claude-verbose 0|1|2    -- Set output verbosity
 /claude-repo             -- List repos / switch directory

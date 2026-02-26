@@ -1,6 +1,6 @@
 [project]
 name = "claude-code-slack"
-version = "0.2.0"
+version = "0.2.1"
 description = "Slack bot for remote Claude Code access with comprehensive configuration management"
 readme = "README.md"
 license = "MIT"
